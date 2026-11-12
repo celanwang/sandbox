@@ -14,7 +14,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 SCHEMA_VERSION = 1
 HTTP_FAULTS = {
     "TIMEOUT_COMMITTED": 504,
@@ -77,6 +76,7 @@ class Episode:
         self.lock = RLock()
         self.generation = 0
         self.closed = False
+        self.in_flight = 0
 
         tool_names = {tool["name"] for tool in domain.tools}
         world = domain.open(scene, seed)
@@ -88,6 +88,10 @@ class Episode:
                 if fault.at != "call" or fault.target is not None:
                     raise ValueError("transport faults apply to calls and take no target")
             elif fault.type in domain.business_faults:
+                if fault.mode != "http" or fault.delaySeconds:
+                    raise ValueError("business faults take neither a transport mode nor a response delay")
+                if fault.at == "start" and (fault.tool != "*" or fault.nth != 1 or fault.persist):
+                    raise ValueError("start faults take no tool selector, ordinal, or persistence")
                 # Validate scheduled targets against the fixture before accepting the run.
                 domain.fault(deepcopy(world), fault)
                 if fault.at == "start":
@@ -111,8 +115,8 @@ class Episode:
             self.fired = set(self.start_faults)
 
     def ensure_idle(self) -> None:
-        if self.generation and any(call["transport"]["state"] == "pending" for call in self.calls):
-            raise EpisodeConflict("episode has responses in flight")
+        if self.in_flight:
+            raise EpisodeConflict("episode has requests in flight")
 
     def _due(self, tool: str, nth: int) -> list[int]:
         due = []
@@ -132,6 +136,9 @@ class Episode:
             due = self._due(tool, nth)
             transport = next((index for index in due if self.faults[index].type in HTTP_FAULTS), None)
             override = self.faults[transport] if transport is not None else None
+            execute = override is None or override.type == "TIMEOUT_COMMITTED"
+            business_faults = [index for index in due if self.faults[index].type in self.domain.business_faults]
+            planned_status = (200 if override.mode == "rpc-error" else HTTP_FAULTS[override.type]) if override else None
             before = deepcopy(self.domain.state(self.world))
             event = {
                 "schemaVersion": SCHEMA_VERSION,
@@ -145,15 +152,22 @@ class Episode:
                 "nth": nth,
                 "request": {"rpcId": rpc_id, "tool": tool, "arguments": deepcopy(arguments), "meta": deepcopy(meta)},
                 "faults": [] if transport is None else [transport],
+                "skippedFaults": [
+                    {"index": index, "reason": "transport_fault_selected"}
+                    for index in due if index != transport and self.faults[index].type in HTTP_FAULTS
+                ] + [
+                    {"index": index, "reason": "business_not_attempted"}
+                    for index in business_faults if not execute
+                ],
                 "business": {"executed": False, "success": None, "result": None},
                 "changes": [],
-                "transport": {"state": "pending", "httpStatus": None, "body": None, "completedAt": None},
+                "transport": {"state": "pending", "httpStatus": None, "body": None, "completedAt": None,
+                              "plannedHttpStatus": planned_status},
             }
-            if override is None or override.type == "TIMEOUT_COMMITTED":
-                fired = [index for index in due if self.faults[index].type in self.domain.business_faults]
-                for index in fired:
+            if execute:
+                for index in business_faults:
                     self.domain.fault(self.world, self.faults[index])
-                event["faults"].extend(fired)
+                event["faults"].extend(business_faults)
                 try:
                     outcome = self.domain.call(self, tool, arguments)
                     event["business"] = {
@@ -180,14 +194,9 @@ class Episode:
             self.calls.append(event)
             return event, override
 
-    def finish(self, event: dict, status: int | None, body: str | None, emitted: bool) -> None:
+    def finish(self, event: dict, status: int | None, body: str | None, state: str) -> None:
         with self.lock:
-            event["transport"] = {
-                "state": "emitted" if emitted else "incomplete",
-                "httpStatus": status,
-                "body": body,
-                "completedAt": utc_now(),
-            }
+            event["transport"].update(state=state, httpStatus=status, body=body, completedAt=utc_now())
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -208,6 +217,10 @@ class Episode:
                 "state": self.domain.state(self.world),
                 "calls": self.calls,
             })
+
+    def events(self) -> list[dict]:
+        with self.lock:
+            return deepcopy(self.calls)
 
 
 class EpisodeStore:
@@ -232,7 +245,15 @@ class EpisodeStore:
         with self.lock:
             return self.bindings.get(token)
 
-    def close(self, episode: Episode) -> None:
+    def admit(self, token: str) -> Episode | None:
+        with self.lock:
+            episode = self.bindings.get(token)
+            if episode is not None:
+                with episode.lock:
+                    episode.in_flight += 1
+            return episode
+
+    def close(self, episode: Episode) -> dict:
         with self.lock, episode.lock:
             episode.ensure_idle()
             episode.closed = True
@@ -240,3 +261,4 @@ class EpisodeStore:
                 if bound is episode:
                     del self.bindings[token]
                     break
+            return episode.snapshot()

@@ -18,12 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 
 from sandbox.domains.mcd import McDelivery
 from sandbox.episodes import Domain, EpisodeConflict, EpisodeStore, Fault, HTTP_FAULTS
-
 
 class OpenEpisode(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -92,7 +91,8 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             await JSONResponse({"error": "not found"}, status_code=404)(scope, receive, send)
             return
         token = bearer(Headers(scope=scope))
-        episode = store.bound(token)
+        admitted = scope["method"] == "POST"
+        episode = store.admit(token) if admitted else store.bound(token)
         if episode is None:
             await JSONResponse({"error": "no active episode for bearer token"}, status_code=401)(
                 scope, receive, send,
@@ -113,6 +113,14 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
 
         async def send_observed(message):
             nonlocal status, emitted
+            if scope.get("sandbox.call") is not None:
+                # The SDK has consumed the POST body. Check for an already queued
+                # disconnect before submitting response bytes to the ASGI server.
+                with anyio.CancelScope() as poll:
+                    poll.cancel()
+                    await receive_observed()
+                if disconnected:
+                    return
             await send(message)
             if message["type"] == "http.response.start":
                 status = message["status"]
@@ -121,7 +129,7 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
                 emitted = not message.get("more_body", False) and not disconnected
                 event = scope.get("sandbox.call")
                 if emitted and event is not None:
-                    episode.finish(event, status, b"".join(parts).decode("utf-8"), emitted=True)
+                    episode.finish(event, status, b"".join(parts).decode("utf-8"), "emitted")
 
         async def send_with_fault(message):
             nonlocal substituted
@@ -146,8 +154,12 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             await manager.handle_request(scope, receive_observed, send_with_fault)
         finally:
             event = scope.get("sandbox.call")
-            if event is not None and not emitted:
-                episode.finish(event, status, b"".join(parts).decode("utf-8") if parts else None, emitted=False)
+            with episode.lock:
+                if event is not None and not emitted:
+                    state = "disconnected" if disconnected else "incomplete"
+                    episode.finish(event, status, b"".join(parts).decode("utf-8") if parts else None, state)
+                if admitted:
+                    episode.in_flight -= 1
 
     def admin_authenticated(request: Request) -> bool:
         return compare_digest(bearer(request.headers).encode(), admin_token.encode())
@@ -179,21 +191,20 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
     async def episode_action(request: Request) -> Response:
         if not admin_authenticated(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        episode = store.get(request.path_params["episode_id"])
+        episode_id = request.path_params["episode_id"]
+        action = request.path_params["action"]
+        episode = store.get(episode_id)
         if episode is None:
             return JSONResponse({"error": "episode not found"}, status_code=404)
-        action = request.path_params["action"]
         if request.method == "GET":
             if action == "snapshot":
                 return JSONResponse(episode.snapshot())
             if action == "events":
-                lines = (json.dumps(event, ensure_ascii=False) for event in episode.snapshot()["calls"])
-                return Response("".join(line + "\n" for line in lines), media_type="application/x-ndjson")
+                return event_stream(episode.events())
         if request.method == "POST":
             try:
                 if action == "close":
-                    store.close(episode)
-                    return JSONResponse(episode.snapshot())
+                    return JSONResponse(store.close(episode))
                 if action == "reset":
                     episode.reset()
                     return JSONResponse(episode.snapshot())
@@ -202,6 +213,7 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
                     with episode.lock:
                         if episode.closed:
                             raise EpisodeConflict("episode is closed")
+                        episode.ensure_idle()
                         episode.round = value.round
                     return JSONResponse({"round": value.round})
             except EpisodeConflict as error:
@@ -209,6 +221,10 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             except ValidationError:
                 return JSONResponse({"error": "round must be a nonnegative integer"}, status_code=400)
         return JSONResponse({"error": "unknown episode action"}, status_code=404)
+
+    def event_stream(events: list[dict]) -> StreamingResponse:
+        lines = (json.dumps(event, ensure_ascii=False) + "\n" for event in events)
+        return StreamingResponse(lines, media_type="application/x-ndjson")
 
     @asynccontextmanager
     async def lifespan(app):

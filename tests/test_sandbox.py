@@ -137,6 +137,119 @@ def test_invalid_quantities_cannot_create_order(client, quantity):
     assert not admin(client, run_id, "snapshot").json()["state"]["orders"]
 
 
+def test_reset_and_round_change_wait_for_admitted_post():
+    import asyncio
+
+    import httpx
+
+    from sandbox.server import create_app
+
+    async def run():
+        app = create_app(admin_token="test-admin")
+        headers = {
+            "Authorization": f"Bearer {MCP_TOKEN}", "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_body():
+            entered.set()
+            await release.wait()
+            yield json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "delivery-query-addresses", "arguments": {}},
+            }).encode()
+
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+                response = await http.post("/admin/episodes", headers=ADMIN, json={"token": MCP_TOKEN})
+                episode = response.raise_for_status().json()["episodeId"]
+                base = f"/admin/episodes/{episode}"
+                request = asyncio.create_task(http.post("/mcp", headers=headers, content=delayed_body()))
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    for action in ("reset", "close", "round"):
+                        response = await http.post(f"{base}/{action}", headers=ADMIN, json={"round": 1})
+                        assert response.status_code == 409
+                finally:
+                    release.set()
+                    response = await asyncio.wait_for(request, 2)
+                assert response.status_code == 200
+                snapshot = (await http.get(f"{base}/snapshot", headers=ADMIN)).raise_for_status().json()
+                assert snapshot["calls"][0]["generation"] == 1
+                reset = (await http.post(f"{base}/reset", headers=ADMIN)).raise_for_status().json()
+                assert reset["generation"] == 2 and reset["calls"] == []
+
+    asyncio.run(run())
+
+
+def test_disconnected_client_records_planned_status_without_response():
+    import asyncio
+
+    import httpx
+
+    from sandbox.server import create_app
+
+    async def run():
+        disconnected = asyncio.Event()
+        messages = []
+        app = create_app(admin_token="test-admin")
+        body = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "create-order", "arguments": ORDER},
+        }).encode()
+
+        async def receive():
+            nonlocal body
+            if body:
+                request, body = body, b""
+                return {"type": "http.request", "body": request, "more_body": False}
+            await disconnected.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            messages.append(message)
+
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+                response = await http.post("/admin/episodes", headers=ADMIN, json={
+                    "token": MCP_TOKEN, "faults": [{
+                        "type": "TIMEOUT_COMMITTED", "tool": "create-order", "delaySeconds": 0.15,
+                    }],
+                })
+                episode = response.raise_for_status().json()["episodeId"]
+                base = f"/admin/episodes/{episode}"
+                scope = {
+                    "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                    "method": "POST", "scheme": "http", "path": "/mcp", "query_string": b"",
+                    "headers": [(b"host", b"localhost"), (b"authorization", f"Bearer {MCP_TOKEN}".encode()),
+                                (b"accept", b"application/json, text/event-stream"),
+                                (b"content-type", b"application/json")],
+                }
+                request = asyncio.create_task(app(scope, receive, send))
+                try:
+                    async with asyncio.timeout(1):
+                        while True:
+                            snapshot = (await http.get(f"{base}/snapshot", headers=ADMIN)).raise_for_status().json()
+                            if snapshot["calls"]:
+                                break
+                            await asyncio.sleep(0)
+                    assert snapshot["calls"][0]["transport"]["state"] == "pending"
+                finally:
+                    disconnected.set()
+                    await asyncio.wait_for(request, 2)
+                final = (await http.get(f"{base}/snapshot", headers=ADMIN)).raise_for_status().json()
+                outcome = final["calls"][0]["transport"]
+                assert outcome["state"] == "disconnected"
+                assert outcome["plannedHttpStatus"] == 504
+                assert outcome["httpStatus"] is None and not messages
+                assert len(final["state"]["orders"]) == 1
+
+    asyncio.run(run())
+
+
 def test_order_list_preserves_creation_order_on_same_clock(client):
     start(client)
     orders = [body(tool(client, "create-order", ORDER))["data"]["orderId"] for _ in range(12)]
@@ -153,6 +266,21 @@ def test_invalid_order_contract_does_not_mutate_state(client, arguments):
     run_id = start(client)
     assert body(tool(client, "create-order", arguments))["success"] is False
     assert not admin(client, run_id, "snapshot").json()["state"]["orders"]
+
+
+def test_due_faults_skipped_by_earlier_fault_are_recorded(client):
+    run_id = start(client, faults=[
+        {"type": "TIMEOUT_NOT_COMMITTED", "tool": "create-order"},
+        {"type": "CONNECTION_FAIL", "tool": "create-order"},
+        {"type": "SOLD_OUT", "tool": "create-order", "target": "100101"},
+    ])
+    assert tool(client, "create-order", ORDER).status_code == 504
+    event = admin(client, run_id, "snapshot").json()["calls"][0]
+    assert event["faults"] == [0]
+    assert event["skippedFaults"] == [
+        {"index": 1, "reason": "transport_fault_selected"},
+        {"index": 2, "reason": "business_not_attempted"},
+    ]
 
 
 def test_order_accepts_available_future_reservation(client):
