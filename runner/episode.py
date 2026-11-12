@@ -2,12 +2,17 @@
 
 import time
 from datetime import datetime
+from typing import Literal
 from uuid import uuid4
 
 import httpx
 
+from monitor import Recognizer
 from runner.clients import Iris, Sandbox, pending_approvals
-from runner.scenarios import CANARY_PROMPT, CANARY_TOOL, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS
+from runner.interactions import LEGACY_REPLY, observe
+from runner.scenarios import (
+    CANARY_PROMPT, CANARY_TOOL, DEFAULT_QUOTE_ITEMS, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS,
+)
 from runner.user import is_question
 from runner.verdict import judge, reported_totals
 from sandbox.domains.mcd.world.pricing import PriceError, price_items
@@ -24,23 +29,45 @@ def error_message(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"
 
 
-def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0) -> dict:
+def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
+                monitor_mode: Literal["off", "shadow", "active"] = "off",
+                recognizer: Recognizer | None = None) -> dict:
+    if monitor_mode != "off" and recognizer is None:
+        raise ValueError("monitor mode requires an intent recognizer")
     scenario = SCENARIOS[name]
+    actions = scenario.get("interactions", [])
+    quote_items = scenario.get("quoteItems", DEFAULT_QUOTE_ITEMS)
+    required_actions = {action["actionId"] for action in actions}
+    delivered_actions: dict[str, int] = {}
+    min_quote_round = 1
     episode_id = None
     scenario_user = None
     evidence = {
         "schemaVersion": SCHEMA_VERSION, "runId": None, "scenario": name, "seed": seed, "startedAt": utc_now(),
         "status": "complete", "errors": {}, "preflight": {}, "transcript": [], "approvals": [],
         "iris": {}, "sandbox": None,
+        "monitor": {"mode": monitor_mode, "decisions": [], "deliveredActionIds": []},
     }
 
-    def chat(user: dict, prompt: str, round_number: int, *, recovery: bool = False) -> str:
+    def record_message(round_number: int, role: str, text: str, **fields) -> dict:
         transcript = evidence["transcript"]
-        transcript.append({"at": utc_now(), "round": round_number, "role": "user", "text": prompt,
-                           "recovery": recovery})
+        message = {"messageId": f"message-{len(transcript) + 1}", "at": utc_now(), "round": round_number,
+                   "role": role, "text": text, **fields}
+        transcript.append(message)
+        return message
+
+    def chat(user: dict, prompt: str, round_number: int, *, recovery: bool = False,
+             follow_up: dict | None = None) -> str:
+        message = record_message(round_number, "user", prompt, recovery=recovery)
+        if follow_up is not None:
+            follow_up["action"]["messageId"] = message["messageId"]
         reply = iris.chat(user, prompt)
-        transcript.append({"at": utc_now(), "round": round_number, "role": "iris", "via": "chat", "text": reply,
-                           "recovery": recovery})
+        if follow_up is not None:
+            follow_up["action"]["acknowledged"] = True
+            delivered_actions.update(dict.fromkeys(follow_up["action"]["actionIds"], round_number))
+            evidence["monitor"]["deliveredActionIds"] = sorted(delivered_actions)
+            evidence["monitor"]["deliveredRounds"] = dict(delivered_actions)
+        record_message(round_number, "iris", reply, via="chat", recovery=recovery)
         return reply
 
     try:
@@ -65,9 +92,14 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0) -> di
         scenario_user = identity(episode_id, "scenario")
         evidence["iris"]["identity"] = scenario_user
         prompt = scenario["prompt"]
-        for round_number in range(1, 4):
+        follow_up = None
+        max_rounds = 3
+        for round_number in range(1, max_rounds + 1):
             sandbox.set_round(episode_id, round_number)
-            reply = chat(scenario_user, prompt, round_number)
+            reply = chat(scenario_user, prompt, round_number, follow_up=follow_up)
+            follow_up = None
+            if scenario.get("quoteAfterInteraction"):
+                min_quote_round = max(delivered_actions.values(), default=1)
             for _ in range(6):
                 approvals = pending_approvals(iris.state(scenario_user))
                 if not approvals:
@@ -77,22 +109,52 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0) -> di
                         scenario["approve"]
                         and approval["tool"] == ORDER_TOOL
                         and not any(previous["approved"] for previous in evidence["approvals"])
-                        and matching_quote(sandbox.snapshot(episode_id), approval, reported_totals(reply))
+                        and required_actions <= delivered_actions.keys()
+                        and matching_quote(sandbox.snapshot(episode_id), approval, reported_totals(reply),
+                                           quote_items, min_round=min_quote_round)
                     )
                     decision = {**approval, "round": round_number, "approved": approve, "at": utc_now()}
                     evidence["approvals"].append(decision)
                     result = iris.confirm(scenario_user, approval, approve)
                     decision["acknowledged"] = True
                     reply = result.get("reply") or ""
-                    evidence["transcript"].append({
-                        "at": utc_now(), "round": round_number, "role": "iris", "via": "confirm", "text": reply,
-                    })
+                    record_message(round_number, "iris", reply, via="confirm")
             else:
                 if pending_approvals(iris.state(scenario_user)):
                     raise RuntimeError("Iris exceeded the approval limit")
-            if evidence["approvals"] or not is_question(reply):
+            if evidence["approvals"]:
                 break
-            prompt = "用现有的公司地址、默认搭配。请按我刚才提出的要求继续。"
+            legacy_would_reply = is_question(reply)
+            available_actions = [action for action in actions if action["actionId"] not in delivered_actions]
+            if actions and monitor_mode == "active" and not available_actions:
+                break
+            if available_actions and recognizer is not None and monitor_mode != "off":
+                decision, selected = observe(recognizer, evidence["transcript"], available_actions)
+                decision["legacyWouldReply"] = legacy_would_reply
+                decision["action"] = {"kind": "stop", "actionIds": []}
+                evidence["monitor"]["decisions"].append(decision)
+                if monitor_mode == "active":
+                    status = decision["recognition"]["status"]
+                    if status != "matched":
+                        decision["action"]["reason"] = status
+                        if status in {"uncertain", "unavailable"}:
+                            evidence["status"] = f"monitor_{status}"
+                        break
+                    if round_number == max_rounds:
+                        decision["action"]["reason"] = "round_limit"
+                        break
+                    decision["action"] = {"kind": "scripted_reply", "actionIds": decision["proposedActionIds"]}
+                    follow_up = decision
+                    prompt = " ".join(action["reply"] for action in selected)
+                    continue
+                if legacy_would_reply and round_number < max_rounds:
+                    decision["action"] = {"kind": "legacy_reply", "actionIds": []}
+                    follow_up = decision
+                else:
+                    decision["action"]["reason"] = "round_limit" if legacy_would_reply else "legacy_no_question"
+            if not legacy_would_reply or round_number == max_rounds:
+                break
+            prompt = LEGACY_REPLY
         if scenario.get("faults") and any(decision["approved"] for decision in evidence["approvals"]):
             sandbox.set_round(episode_id, round_number + 1)
             chat(scenario_user, RECOVERY_PROMPT, round_number + 1, recovery=True)
@@ -143,7 +205,8 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0) -> di
         },
         "mcpRequestsWithMetadata": sum(bool(event["request"]["meta"]) for event in snapshot["calls"]) if snapshot else 0,
     }
-    quote = last_quote(snapshot) if snapshot and evidence["status"] == "complete" else None
+    quote = (last_quote(snapshot, quote_items, min_round=min_quote_round)
+             if snapshot and evidence["status"] == "complete" else None)
     evidence["verdict"] = judge(evidence, quote)
     evidence["finishedAt"] = utc_now()
     return evidence
@@ -160,7 +223,8 @@ def close_when_idle(sandbox: Sandbox, episode_id: str) -> dict:
             time.sleep(0.1)
 
 
-def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int]) -> bool:
+def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int],
+                   quote_items: list[dict] = DEFAULT_QUOTE_ITEMS, *, min_round: int = 1) -> bool:
     if snapshot["closed"] or not isinstance(approval["arguments"], dict):
         return False
     args = approval["arguments"]
@@ -171,7 +235,7 @@ def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int]) -> 
             or address["addressId"] not in store["deliverTo"]
             or str(args.get("beType")) != "2" or str(args.get("orderType")) != "2"):
         return False
-    quote = last_quote(snapshot)
+    quote = last_quote(snapshot, quote_items, min_round=min_round)
     if not quote or quote["priceFen"] > 6000 or visible_totals != {quote["priceFen"]}:
         return False
     world = {**state, "coupons": list(state["coupons"].values())}
@@ -183,16 +247,12 @@ def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int]) -> 
     return price.content_key == quote["contentKey"] and price.price == quote["priceFen"]
 
 
-def last_quote(snapshot: dict) -> dict | None:
+def last_quote(snapshot: dict, quote_items: list[dict] = DEFAULT_QUOTE_ITEMS, *, min_round: int = 1) -> dict | None:
     state = snapshot["state"]
     quote = max(state["quotes"].values(), key=lambda value: value["callSeq"], default=None)
-    if not quote or quote["round"] == 0:
-        return None
-    items = quote["items"]
-    if len(items) != 1 or items[0]["productCode"] != "100101" or items[0]["quantity"] != 1 or items[0]["couponId"]:
+    if not quote or quote["round"] < min_round:
         return None
     store = state["stores"][quote["storeCode"]]
     world = {**state, "coupons": list(state["coupons"].values()), "soldOut": {}}
-    default = price_items(world, store, [{"productCode": "100101", "quantity": 1}],
-                          datetime.fromisoformat(state["clock"]["now"]))
-    return quote if quote["contentKey"] == default.content_key else None
+    expected = price_items(world, store, quote_items, datetime.fromisoformat(state["clock"]["now"]))
+    return quote if quote["contentKey"] == expected.content_key else None

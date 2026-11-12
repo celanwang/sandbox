@@ -4,6 +4,8 @@ import httpx
 import pytest
 
 from conftest import ADMIN, MCP_TOKEN, ORDER, tool
+from monitor import Decision, Match, Recognition
+from monitor.__main__ import replay
 from runner.__main__ import save
 from runner.clients import Iris, Sandbox
 from runner.episode import run_episode
@@ -32,7 +34,7 @@ class FakeIris:
                 return httpx.Response(200, text="有一个公司地址。")
             if data["prompt"] == RECOVERY_PROMPT:
                 return self.recover()
-            result = tool(self.sandbox, "calculate-price", ORDER).raise_for_status().json()
+            result = tool(self.sandbox, "calculate-price", self.order).raise_for_status().json()
             price = json.loads(result["result"]["content"][0]["text"])["data"]["price"]
             if SCENARIOS[self.name]["expectApproval"]:
                 self.pending[user_id] = {
@@ -53,7 +55,7 @@ class FakeIris:
             self.confirmations.append(data)
             del self.pending[data["userId"]]
             if data["approved"]:
-                result = tool(self.sandbox, "create-order", ORDER)
+                result = tool(self.sandbox, "create-order", self.order)
                 operation = {"tool": "create-order", "status": "UNKNOWN"}
                 self.operations[data["userId"]] = operation
                 if result.status_code == 504:
@@ -82,7 +84,7 @@ def sandbox_client(client):
     return Sandbox(client, MCP_TOKEN)
 
 
-@pytest.mark.parametrize("name", SCENARIOS)
+@pytest.mark.parametrize("name", [name for name, scenario in SCENARIOS.items() if not scenario.get("interactions")])
 def test_scripted_cases_and_evidence(client, sandbox_client, tmp_path, name):
     fake = FakeIris(client, name)
     with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
@@ -245,3 +247,128 @@ def test_interrupt_during_final_trace_releases_token(client, sandbox_client):
     assert evidence["status"] == "interrupted"
     assert evidence["sandbox"]["closed"] and len(evidence["sandbox"]["state"]["orders"]) == 1
     assert sandbox_client.start(SCENARIOS["order"], 0) != evidence["runId"]
+
+
+class ClarifyingIris(FakeIris):
+    def __init__(self, sandbox_client, name):
+        scenario = SCENARIOS[name]
+        order = {**ORDER, "items": scenario.get("quoteItems", ORDER["items"])}
+        super().__init__(sandbox_client, name, order=order)
+        self.question = {
+            "clarify-address": "配送地点请在公司和家中选一处。",
+            "clarify-drink": "套餐饮料可换，请告知您的饮料选择。",
+        }[name]
+        self.scenario_prompts = []
+
+    def handle(self, request):
+        if request.url.path == "/api/chat":
+            data = json.loads(request.content)
+            if "-scenario-" in data["userId"]:
+                self.scenario_prompts.append(data["prompt"])
+                if len(self.scenario_prompts) == 1:
+                    return httpx.Response(200, text=self.question)
+        return super().handle(request)
+
+
+class FixtureRecognizer:
+    def __init__(self, status="matched", intent_id=None):
+        self.status = status
+        self.intent_id = intent_id
+        self.observations = []
+
+    def recognize(self, observation):
+        self.observations.append(observation)
+        if self.status == "unavailable":
+            return Recognition(None, "test-model", "1", 0, 1, error="timeout")
+        matches = []
+        if self.status == "matched":
+            matches = [Match(intentId=self.intent_id or observation.candidates[0].intentId,
+                             evidence=observation.reply.text)]
+        return Recognition(Decision(status=self.status, matches=matches), "test-model", "1", 0, 1)
+
+
+@pytest.mark.parametrize("name", ["clarify-address", "clarify-drink"])
+def test_active_monitor_completes_multiturn_order(client, sandbox_client, tmp_path, name):
+    fake = ClarifyingIris(client, name)
+    recognizer = FixtureRecognizer()
+    expected = SCENARIOS[name]["interactions"][0]
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode(name, Iris(iris_http), sandbox_client, monitor_mode="active", recognizer=recognizer)
+    assert evidence["verdict"]["status"] == "passed", evidence["verdict"]
+    assert fake.scenario_prompts == [SCENARIOS[name]["prompt"], expected["reply"]]
+    assert [record["approved"] for record in fake.confirmations] == [True]
+    assert evidence["monitor"]["deliveredActionIds"] == [expected["actionId"]]
+    observation, = recognizer.observations
+    assert expected["reply"] not in json.dumps(observation.as_dict(), ensure_ascii=False)
+    decision, = evidence["monitor"]["decisions"]
+    assert decision["legacyWouldReply"] is False
+    assert decision["action"] == {"kind": "scripted_reply", "actionIds": [expected["actionId"]],
+                                  "messageId": "message-3", "acknowledged": True}
+    save(tmp_path / name, evidence)
+    row, = replay(tmp_path / name / "evidence.json", recognizer)
+    assert row["sameIntents"] and row["recordedAction"] == decision["action"]
+
+
+@pytest.mark.parametrize(("model_status", "expected_status"), [
+    ("uncertain", "monitor_uncertain"), ("unavailable", "monitor_unavailable"), ("no_match", "complete"),
+])
+def test_active_monitor_does_not_reply_on_unresolved_turn(client, sandbox_client, model_status, expected_status):
+    fake = ClarifyingIris(client, "clarify-address")
+    fake.question = "请问送到哪里？"
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("clarify-address", Iris(iris_http), sandbox_client, monitor_mode="active",
+                               recognizer=FixtureRecognizer(model_status))
+    assert evidence["status"] == expected_status
+    assert evidence["monitor"]["decisions"][0]["action"]["reason"] == model_status
+    assert evidence["monitor"]["decisions"][0]["legacyWouldReply"]
+    assert len(fake.scenario_prompts) == 1 and not fake.confirmations
+    assert evidence["sandbox"]["closed"]
+    assert evidence["verdict"]["status"] == ("failed" if model_status == "no_match" else "unavailable")
+
+
+def test_shadow_records_proposal_without_choosing_the_reply(client, sandbox_client):
+    fake = ClarifyingIris(client, "clarify-drink")
+    fake.question = "您想换成哪种饮料？"
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("clarify-drink", Iris(iris_http), sandbox_client, monitor_mode="shadow",
+                               recognizer=FixtureRecognizer())
+    record, = evidence["monitor"]["decisions"]
+    assert record["proposedActionIds"] == ["provide_drink_preference"]
+    assert record["action"]["kind"] == "legacy_reply"
+    assert "默认搭配" in fake.scenario_prompts[1] and "咖啡" not in fake.scenario_prompts[1]
+    assert not evidence["monitor"]["deliveredActionIds"]
+    assert fake.confirmations[0]["approved"] is False
+
+
+def test_monitor_cannot_replace_an_early_iris_approval(client, sandbox_client):
+    fake = FakeIris(client, "clarify-address")
+    recognizer = FixtureRecognizer()
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("clarify-address", Iris(iris_http), sandbox_client, monitor_mode="active",
+                               recognizer=recognizer)
+    assert [confirmation["approved"] for confirmation in fake.confirmations] == [False]
+    assert not recognizer.observations
+    assert not evidence["sandbox"]["state"]["orders"]
+
+
+def test_multiple_intents_use_scenario_reply_order(client, sandbox_client, monkeypatch):
+    address, drink = SCENARIOS["clarify-address"], SCENARIOS["clarify-drink"]
+    monkeypatch.setitem(SCENARIOS, "clarify-address", {
+        **address, "interactions": address["interactions"] + drink["interactions"], "quoteItems": drink["quoteItems"],
+    })
+    fake = ClarifyingIris(client, "clarify-address")
+    fake.question = "请选地址。再告知想喝哪种饮料。"
+
+    class MultipleIntents:
+        def recognize(self, observation):
+            decision = Decision(status="matched", matches=[
+                Match(intentId="request_meal_preference", evidence="告知想喝哪种饮料"),
+                Match(intentId="request_delivery_address", evidence="请选地址"),
+            ])
+            return Recognition(decision, "test-model", "1", 0, 1)
+
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("clarify-address", Iris(iris_http), sandbox_client, monitor_mode="active",
+                               recognizer=MultipleIntents())
+    assert evidence["verdict"]["status"] == "passed"
+    assert fake.scenario_prompts[1] == "送到已有的公司地址。 饮料换成中杯鲜萃咖啡，其余按默认搭配。"

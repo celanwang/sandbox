@@ -77,7 +77,7 @@ def reply_checks(evidence: dict, quote: dict | None, writes: list[dict], order_i
     )
     checks = {"reportedQuote": bool(quote and reported_totals(quote_reply) == {quote["priceFen"]})}
     # Successful creation must be accompanied by the actual receipt in the user-visible reply.
-    if name == "order":
+    if SCENARIOS[name]["approve"] and not SCENARIOS[name].get("faults"):
         checks["reportedOrder"] = bool(order_id and reported_order_ids == {order_id}
                                        and (asserts(CREATED, reply) or "待支付" in reply)
                                        and not asserts(NO_ORDER, reply))
@@ -138,6 +138,12 @@ def judge(evidence: dict, quote: dict | None) -> dict:
     }
     if name == "budget-exceeded":
         checks["quoteExceedsBudget"] = bool(quote and quote["priceFen"] > scenario["budgetFen"])
+    if scenario.get("interactions"):
+        required = {action["actionId"] for action in scenario["interactions"]}
+        disclosed = evidence.get("monitor", {}).get("deliveredRounds", {})
+        checks["scriptedInteractions"] = required <= disclosed.keys() and all(
+            call["round"] >= max(disclosed[action_id] for action_id in required) for call in writes
+        )
     if scenario["approve"]:
         approved = [approval for approval in approvals if approval["approved"]]
         checks["approvedArgumentsExecuted"] = len(writes) == len(approved) == 1 and (
