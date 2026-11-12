@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Sandbox run exports
+/runs/
+
+# macOS Finder metadata
+.DS_Store
