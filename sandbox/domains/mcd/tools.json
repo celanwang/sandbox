@@ -28,33 +28,6 @@
                 "description": "优惠券Id",
                 "type": "string"
               },
-              "modification": {
-                "description": "商品特制选项",
-                "properties": {
-                  "values": {
-                    "description": "特制选项列表",
-                    "items": {
-                      "properties": {
-                        "code": {
-                          "description": "特制code",
-                          "type": "string"
-                        },
-                        "key": {
-                          "description": "特制key",
-                          "type": "string"
-                        },
-                        "quantity": {
-                          "description": "特制数量",
-                          "type": "integer"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "type": "array"
-                  }
-                },
-                "type": "object"
-              },
               "productCode": {
                 "description": "商品code",
                 "type": "string"
@@ -191,33 +164,6 @@
               "couponId": {
                 "description": "优惠券Id",
                 "type": "string"
-              },
-              "modification": {
-                "description": "商品特制选项",
-                "properties": {
-                  "values": {
-                    "description": "特制选项列表",
-                    "items": {
-                      "properties": {
-                        "code": {
-                          "description": "特制code",
-                          "type": "string"
-                        },
-                        "key": {
-                          "description": "特制key",
-                          "type": "string"
-                        },
-                        "quantity": {
-                          "description": "特制数量",
-                          "type": "integer"
-                        }
-                      },
-                      "type": "object"
-                    },
-                    "type": "array"
-                  }
-                },
-                "type": "object"
               },
               "productCode": {
                 "description": "商品code",

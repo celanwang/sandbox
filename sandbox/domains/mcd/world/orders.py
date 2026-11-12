@@ -71,7 +71,8 @@ def build_order(*, order_id: str, pay_id: str, store: dict, address: dict, price
         },
         # 判定用：下单前最近一次报价（不论内容）以及它和订单是否一致
         "lastQuote": last_quote,
-        "quoteMatchesOrder": bool(last_quote and last_quote["contentKey"] == priced.content_key),
+        "quoteMatchesOrder": bool(last_quote and last_quote["contentKey"] == priced.content_key
+                                  and last_quote["priceFen"] == priced.price),
         "cancelReason": None,
     }
 

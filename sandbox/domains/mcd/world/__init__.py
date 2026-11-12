@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -115,7 +115,6 @@ def reservation_options(store: dict, now: datetime, days: int = 3) -> list[dict]
     store["reservationPeriods"] 形如 [["夜市", ["00:00", "00:29"], ["17:30", "23:59"]], ["早餐", ["07:30", "10:59"]], ...]，
     今天的时段还需满足场景配置的最短提前量。
     """
-    from datetime import timedelta
     periods = store.get("reservationPeriods") or []
     if not store.get("reservation") or not periods:
         return []
@@ -136,3 +135,15 @@ def reservation_options(store: dict, now: datetime, days: int = 3) -> list[dict]
             out.append({"date": day.strftime("%Y-%m-%d"), "today": i == 0,
                         "reservationOptionText": ",".join(t for _, t in parts)})
     return out
+
+
+def reservation_available(store: dict, now: datetime, scheduled: datetime) -> bool:
+    lead = timedelta(minutes=store.get("reservationLeadMinutes", 30))
+    if (not store.get("reservation") or scheduled < now + lead
+            or scheduled.date() >= now.date() + timedelta(days=3)):
+        return False
+    return any(
+        _hm(start) <= scheduled.time() <= _hm(end)
+        for _, *ranges in store.get("reservationPeriods", [])
+        for start, end in ranges
+    )

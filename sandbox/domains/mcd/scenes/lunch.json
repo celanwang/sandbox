@@ -61,7 +61,7 @@
         "100101": {
           "code": "100101",
           "name": "巨无霸三件套",
-          "supportModify": true,
+          "supportModify": false,
           "rounds": [
             {"id": "1", "name": "主食", "quantity": 1, "choices": [{"code": "100201", "name": "巨无霸", "quantity": 1, "diffPrice": 0}]},
             {"id": "2", "name": "小食", "quantity": 1, "choices": [{"code": "100202", "name": "中薯条", "quantity": 1, "diffPrice": 0}]},

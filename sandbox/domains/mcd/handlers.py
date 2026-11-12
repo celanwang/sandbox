@@ -223,7 +223,7 @@ def calculate_price(ep: Episode, args: dict) -> Result:
 
 
 def create_order(ep: Episode, args: dict) -> Result:
-    _require(args, "storeCode", "beType", "items")
+    _require(args, "storeCode", "orderType", "beType", "items")
     _delivery_mode(args)
     _require(args, "addressId")
     store = _store(ep, args)
@@ -242,9 +242,11 @@ def create_order(ep: Episode, args: dict) -> Result:
     reservation = str(args.get("reservationDate") or "").strip()
     if reservation:
         try:
-            datetime.strptime(reservation, "%Y-%m-%d %H:%M")
+            scheduled = datetime.strptime(reservation, "%Y-%m-%d %H:%M")
         except ValueError:
             return _fail(ep, "reservationDate 格式应为 yyyy-MM-dd HH:mm")
+        if not W.reservation_available(store, now, scheduled):
+            return _fail(ep, "该门店或时段不支持预约配送")
     try:
         priced = price_items(ep.world, store, args["items"], now, bool(args.get("needTableware")))
     except PriceError as e:
@@ -256,7 +258,7 @@ def create_order(ep: Episode, args: dict) -> Result:
         store=store, address=address, priced=priced, create_time=ep.world["clock"], remark=remark,
         last_quote=dict(ep.world["quotes"][-1]) if ep.world["quotes"] else None,
     )
-    order["reservationDate"] = reservation or None   # 沙箱只记录，不校验预约时段
+    order["reservationDate"] = reservation or None
     order["createdAtCallSeq"] = ep.seq + 1
     order["createdInRound"] = ep.round
     ep.world["orders"].append(order)
@@ -276,7 +278,8 @@ def query_order(ep: Episode, args: dict) -> Result:
 
 
 def order_list(ep: Episode, args: dict) -> Result:
-    recent = sorted(ep.world["orders"], key=lambda o: (o["createTime"], o["orderId"]), reverse=True)[:10]
+    recent = sorted(ep.world["orders"], key=lambda o: (o["createTime"], o.get("createdAtCallSeq", 0)),
+                    reverse=True)[:10]
     return envelope(ep, {"list": [O.list_view(o) for o in recent]})
 
 

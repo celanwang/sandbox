@@ -135,3 +135,27 @@ def test_invalid_quantities_cannot_create_order(client, quantity):
     result = body(tool(client, "create-order", {**ORDER, "items": [{"productCode": "100101", "quantity": quantity}]}))
     assert result["success"] is False
     assert not admin(client, run_id, "snapshot").json()["state"]["orders"]
+
+
+def test_order_list_preserves_creation_order_on_same_clock(client):
+    start(client)
+    orders = [body(tool(client, "create-order", ORDER))["data"]["orderId"] for _ in range(12)]
+    listed = body(tool(client, "order-list"))["data"]["list"]
+    assert [order["orderId"] for order in listed] == list(reversed(orders[-10:]))
+
+
+@pytest.mark.parametrize("arguments", [
+    {key: value for key, value in ORDER.items() if key != "orderType"},
+    {**ORDER, "reservationDate": "2020-01-01 01:00"},
+    {**ORDER, "items": [{**ORDER["items"][0], "modification": {"values": [{"code": "unknown"}]}}]},
+])
+def test_invalid_order_contract_does_not_mutate_state(client, arguments):
+    run_id = start(client)
+    assert body(tool(client, "create-order", arguments))["success"] is False
+    assert not admin(client, run_id, "snapshot").json()["state"]["orders"]
+
+
+def test_order_accepts_available_future_reservation(client):
+    start(client)
+    result = body(tool(client, "create-order", {**ORDER, "reservationDate": "2026-11-10 13:00"}))
+    assert result["success"] is True

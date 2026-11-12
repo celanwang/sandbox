@@ -267,6 +267,8 @@ def price_items(world: dict, store: dict, raw_items: Any, now: datetime, need_ta
         qty = _as_int(item.get("quantity"), "quantity")
         if qty < 1:
             raise PriceError("商品数量必须大于 0")
+        if item.get("modification"):
+            raise PriceError("当前场景不支持单品特调，请使用菜单提供的套餐子项")
         detail = menu.get("details", {}).get(code)
         choices, extra = _resolve_choices(detail, item.get("roundList"), code)
         coupon = _resolve_coupon(world, item, code, now)
