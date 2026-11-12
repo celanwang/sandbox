@@ -18,7 +18,7 @@ export MCD_MCP_TOKEN="$(openssl rand -hex 24)"
 python -m sandbox.server
 ```
 
-The service listens on `127.0.0.1:8100`. Use the same environment variables in the terminals that make requests. The admin bearer token manages episodes. The MCP bearer token selects an active episode.
+The service listens on `127.0.0.1:8100`. Use the same environment variables in the terminals that make requests. The admin bearer token manages episodes. The MCP bearer token selects an active episode. Start with `--archive-dir runs/sandbox-archive` to retain closed snapshots across restarts and release their in-memory state.
 
 To open an episode and list its tools without Iris, run the following in another terminal.
 
@@ -49,10 +49,34 @@ With Sandbox and Iris running, start the runner from the Sandbox repository. The
 
 ```sh
 python -m runner --iris http://127.0.0.1:8080/api
-python -m runner quote order deny timeout-before timeout-after --seed 0
+python -m runner quote order deny budget-exceeded timeout-before timeout-after --seed 0
 ```
 
 Each episode writes `evidence.json` and `events.jsonl` under `runs/<batch>/<scenario>/`. The runner returns a nonzero exit code if any scenario fails its checks or required evidence is unavailable. Each token has one active episode at a time. The runner closes its episode after collecting evidence. Manual sessions can use a separate token or close their episode before reusing the runner token.
+
+The timeout scenarios verify the injected response, the order state and Iris ledger, a read-only lookup after submission, and the user-visible conclusion. The runner sends a scripted read-only follow-up and marks it in the transcript. It checks explicit total and order references in the scripted responses. Provide `--iris-revision` to record the build revision alongside the observed model names, scenario settings, and trace limitations.
+
+### Run the intent monitor
+
+`monitor` classifies user-visible dialogue with Bailian `qwen3.8-flash`. It receives the latest Iris reply, a bounded dialogue history, and the intent definitions for the current turn. The runner maps validated matches to scenario-owned replies. Iris approvals still use the pending ledger entry and deterministic scenario checks.
+
+```sh
+export MONITOR_DASHSCOPE_API_KEY='<your Bailian API key>'
+python -m runner clarify-address clarify-drink --monitor active
+```
+
+`DASHSCOPE_API_KEY` can supply the key if `MONITOR_DASHSCOPE_API_KEY` is unset. Set `MONITOR_BASE_URL` to use a workspace-specific OpenAI-compatible base URL.
+
+- `active` uses verified matches for configured replies. An uncertain or unavailable classification ends automatic follow-up and preserves the reason in the evidence.
+- `shadow` records the proposed action while the runner follows the keyword baseline.
+- `off` is the default and runs the original scenarios when no names are supplied. The clarification scenarios require the expected dialogue before an order can pass.
+
+Each decision links its exact model input and recognition result to the Iris message and the actual user reply in `evidence.json`. Replay the recorded decision locally or ask Qwen to classify the captured input again.
+
+```sh
+python -m monitor runs/<batch>/<scenario>/evidence.json
+python -m monitor runs/<batch>/<scenario>/evidence.json --reclassify
+```
 
 ## Manage episodes and export traces
 
@@ -61,12 +85,16 @@ All paths in this table use `SANDBOX_ADMIN_TOKEN` as a bearer token.
 | Method and path | Behavior |
 | --- | --- |
 | `GET /admin/catalog` | List domains and scenes. |
+| `GET /admin/episodes` | List active, closed, and archived episodes by ID. |
 | `POST /admin/episodes` | Open an episode with `token`, optional `domain`, `scene`, `seed`, and `faults`. Defaults are `mcd`, `lunch`, and seed zero. |
 | `POST /admin/episodes/{id}/round` | Set the round using `{"round": 1}`. |
 | `GET /admin/episodes/{id}/snapshot` | Read the fault plan, initial and current state, and call events. |
 | `GET /admin/episodes/{id}/events` | Export tool events as newline-delimited JSON. |
 | `POST /admin/episodes/{id}/reset` | Restore the initial state and fault plan, clear calls, and increment the generation. |
 | `POST /admin/episodes/{id}/close` | Seal the episode, return its final snapshot, and release the bearer token. |
+| `DELETE /admin/episodes/{id}` | Remove a closed episode or its on-disk archive. |
+
+Round changes, resets, and closes return HTTP 409 while an admitted MCP POST is in flight. If archive publication fails, the episode remains active so the administrator can retry closing it.
 
 To simulate an order that committed before timing out, pass this fault plan when opening an episode.
 
@@ -78,9 +106,9 @@ To simulate an order that committed before timing out, pass this fault plan when
 
 `TIMEOUT_COMMITTED` and `TIMEOUT_NOT_COMMITTED` both return HTTP 504. The former runs the tool before substituting the 504. `CONNECTION_FAIL` returns 502 and `AUTH_401` returns 401. Transport faults also accept `mode: "rpc-error"` to emit a JSON-RPC error under HTTP 200, and `delaySeconds` to delay the response. Business faults `SOLD_OUT`, `STORE_CLOSED`, and `COUPON_INVALID` take a product, store, or coupon ID in `target`. They can apply at episode start via `"at": "start"`. Faults can target a named tool or all calls via `"*"`, and `persist: true` repeats a fault from its configured call onward.
 
-Each version 1 `tool.call` event includes the run ID, generation, request ID, JSON-RPC ID, arguments, optional MCP metadata, fault indexes, business result, entity changes, and the HTTP status and body emitted by the service. Entity changes identify the collection and ID and contain the before and after values. A committed timeout can therefore carry an order creation in `changes` and an empty 504 response in `transport`. `transport.state` reports what the server observed when sending; client receipt is captured by the client.
+Each version 1 `tool.call` event includes the run ID, generation, request ID, JSON-RPC ID, arguments, optional MCP metadata, triggered and skipped faults, business result, entity changes, and transport observations. Entity changes contain the before and after values. A delayed timeout can record an order creation, a planned HTTP 504, and a disconnect with no submitted HTTP status. `emitted` means the response was handed to the ASGI server. Client receipt requires client-side evidence.
 
-The runner adds the scripted conversation, approval decisions, and the Iris state and trace available through its public API. The sandbox request ID identifies a single transport attempt. Cross-service matching at call granularity requires upstream correlation metadata. Episode state is in memory, so export it before restarting the service.
+The runner adds the scripted conversation, approval decisions, and the Iris state and trace available through its public API. The sandbox request ID identifies a single transport attempt. Cross-service matching at call granularity requires upstream correlation metadata. Active episodes are in memory. When archiving is enabled, closing an episode publishes its final snapshot on disk.
 
 ## Test
 
