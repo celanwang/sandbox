@@ -1,0 +1,98 @@
+{
+  "scene_id": "lunch",
+  "clock": "2026-11-10 12:00:00",
+  "addresses": [
+    {
+      "addressId": "1000000000000000000000000001",
+      "tag": "公司",
+      "contactName": "沙箱用户",
+      "phone": "100****0001",
+      "fullAddress": "深圳市沙箱测试区示例路1号 A座 101（公司，模拟地址）"
+    },
+    {
+      "addressId": "1000000000000000000000000002",
+      "tag": "家",
+      "contactName": "沙箱用户",
+      "phone": "100****0002",
+      "fullAddress": "深圳市沙箱测试区示例路2号 B座 202（家，模拟地址）"
+    }
+  ],
+  "stores": [
+    {
+      "storeCode": "100001",
+      "beCode": "10000102",
+      "storeName": "麦当劳示例路餐厅（模拟）",
+      "address": "深圳市沙箱测试区示例路3号",
+      "businessStartTime": "07:00",
+      "businessEndTime": "22:00",
+      "reservation": true,
+      "reservationPeriods": [["午餐", ["11:00", "14:59"]], ["晚餐", ["17:00", "21:00"]]],
+      "deliverTo": ["1000000000000000000000000001", "1000000000000000000000000002"],
+      "deliveryFeeFen": 600,
+      "packingFee": {"defaultFen": 190, "capFen": 300},
+      "menu": "default"
+    },
+    {
+      "storeCode": "100002",
+      "beCode": "10000202",
+      "storeName": "麦当劳示例公园餐厅（模拟）",
+      "address": "深圳市沙箱测试区示例路4号",
+      "businessStartTime": "11:00",
+      "businessEndTime": "20:00",
+      "deliverTo": ["1000000000000000000000000001"],
+      "deliveryFeeFen": 800,
+      "packingFee": {"defaultFen": 190, "capFen": 300},
+      "menu": "default"
+    }
+  ],
+  "menus": {
+    "default": {
+      "categories": [
+        {"name": "套餐", "meals": [{"code": "100101"}, {"code": "100102"}]},
+        {"name": "小食和饮料", "meals": [{"code": "100103"}, {"code": "100104"}]}
+      ],
+      "meals": {
+        "100101": {"name": "巨无霸三件套", "productType": 7, "currentPrice": "46", "originalPrice": "46", "image": ""},
+        "100102": {"name": "麦辣鸡腿汉堡套餐", "productType": 1, "currentPrice": "39", "originalPrice": "39", "image": ""},
+        "100103": {"name": "麦乐鸡5块", "productType": 1, "currentPrice": "16", "originalPrice": "16", "image": ""},
+        "100104": {"name": "中杯可口可乐", "productType": 1, "currentPrice": "12", "originalPrice": "12", "image": ""}
+      },
+      "details": {
+        "100101": {
+          "code": "100101",
+          "name": "巨无霸三件套",
+          "supportModify": true,
+          "rounds": [
+            {"id": "1", "name": "主食", "quantity": 1, "choices": [{"code": "100201", "name": "巨无霸", "quantity": 1, "diffPrice": 0}]},
+            {"id": "2", "name": "小食", "quantity": 1, "choices": [{"code": "100202", "name": "中薯条", "quantity": 1, "diffPrice": 0}]},
+            {"id": "3", "name": "饮料", "quantity": 1, "choices": [
+              {"code": "100104", "name": "中杯可口可乐", "quantity": 1, "diffPrice": 0},
+              {"code": "100203", "name": "中杯鲜萃咖啡", "quantity": 0, "diffPrice": 2}
+            ]}
+          ]
+        },
+        "100102": {
+          "code": "100102",
+          "name": "麦辣鸡腿汉堡套餐",
+          "supportModify": false,
+          "rounds": [
+            {"id": "1", "name": "主食", "quantity": 1, "choices": [{"code": "100204", "name": "麦辣鸡腿汉堡", "quantity": 1, "diffPrice": 0}]},
+            {"id": "2", "name": "小食", "quantity": 1, "choices": [{"code": "100202", "name": "中薯条", "quantity": 1, "diffPrice": 0}]},
+            {"id": "3", "name": "饮料", "quantity": 1, "choices": [{"code": "100104", "name": "中杯可口可乐", "quantity": 1, "diffPrice": 0}]}
+          ]
+        }
+      }
+    }
+  },
+  "coupons": [
+    {
+      "couponId": "sandbox-lunch",
+      "couponCode": "SANDBOX5",
+      "title": "麦辣鸡腿汉堡套餐立减5元",
+      "appliesTo": ["100102"],
+      "discountFen": 500,
+      "validFrom": "10:00",
+      "validTo": "21:00"
+    }
+  ]
+}

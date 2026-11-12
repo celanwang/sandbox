@@ -1,0 +1,535 @@
+[
+  {
+    "name": "calculate-price",
+    "description": "为指定门店的麦乐送购物车计算商品价、配送费、打包费及总价。返回的金额以分计。",
+    "inputSchema": {
+      "properties": {
+        "beCode": {
+          "description": "业务编码，与storeCode 配对使用，从query-nearby-stores或delivery-query-stores返回结果中获取。得来速(beType=5)/外送(orderType=2)/团餐场景必传，到店自取(beType=1)场景不传",
+          "type": "string"
+        },
+        "beType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "items": {
+          "description": "商品列表。套餐未传 roundList 时使用默认搭配。",
+          "items": {
+            "description": "",
+            "properties": {
+              "couponCode": {
+                "description": "优惠券code",
+                "type": "string"
+              },
+              "couponId": {
+                "description": "优惠券Id",
+                "type": "string"
+              },
+              "modification": {
+                "description": "商品特制选项",
+                "properties": {
+                  "values": {
+                    "description": "特制选项列表",
+                    "items": {
+                      "properties": {
+                        "code": {
+                          "description": "特制code",
+                          "type": "string"
+                        },
+                        "key": {
+                          "description": "特制key",
+                          "type": "string"
+                        },
+                        "quantity": {
+                          "description": "特制数量",
+                          "type": "integer"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "productCode": {
+                "description": "商品code",
+                "type": "string"
+              },
+              "quantity": {
+                "description": "数量，必填，不能为空，且大于等于1",
+                "type": "integer",
+                "minimum": 1
+              },
+              "roundList": {
+                "description": "套餐子项",
+                "items": {
+                  "properties": {
+                    "comboItemList": {
+                      "description": "套餐套餐round下商品",
+                      "items": {
+                        "properties": {
+                          "code": {
+                            "description": "商品编码",
+                            "type": "string"
+                          },
+                          "quantity": {
+                            "description": "商品数量",
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        },
+                        "type": "object",
+                        "required": [
+                          "code",
+                          "quantity"
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    "round": {
+                      "description": "套餐round",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "round",
+                    "comboItemList"
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "type": "object",
+            "required": [
+              "productCode",
+              "quantity"
+            ]
+          },
+          "type": "array",
+          "minItems": 1
+        },
+        "needTableware": {
+          "description": "是否需要餐具，true需要，false不需要",
+          "type": "boolean"
+        },
+        "orderType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "storeCode": {
+          "description": "门店编码（storeCode）, 不能为空",
+          "type": "string"
+        }
+      },
+      "required": [
+        "storeCode",
+        "orderType",
+        "beType",
+        "items"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "cancel-order",
+    "description": "按订单编号取消麦乐送订单。提供取消原因代码。",
+    "inputSchema": {
+      "properties": {
+        "cancelReasonCode": {
+          "description": "取消原因code，默认为1",
+          "type": "string"
+        },
+        "orderId": {
+          "description": "订单号",
+          "type": "string"
+        }
+      },
+      "required": [
+        "orderId",
+        "cancelReasonCode"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "create-order",
+    "description": "使用已有配送地址创建麦乐送订单。复用已报价的门店和商品参数。返回订单编号、订单详情及模拟支付链接。",
+    "inputSchema": {
+      "properties": {
+        "addressId": {
+          "description": "配送地址id，外送or团餐的地址",
+          "type": "string"
+        },
+        "beCode": {
+          "description": "业务编码，与storeCode 配对使用，从query-nearby-stores或delivery-query-stores返回结果中获取。得来速(beType=5)/外送(orderType=2)/团餐场景必传，到店自取(beType=1)场景不传",
+          "type": "string"
+        },
+        "beType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "items": {
+          "description": "商品列表。套餐未传 roundList 时使用默认搭配。",
+          "items": {
+            "description": "",
+            "properties": {
+              "couponCode": {
+                "description": "优惠券code",
+                "type": "string"
+              },
+              "couponId": {
+                "description": "优惠券Id",
+                "type": "string"
+              },
+              "modification": {
+                "description": "商品特制选项",
+                "properties": {
+                  "values": {
+                    "description": "特制选项列表",
+                    "items": {
+                      "properties": {
+                        "code": {
+                          "description": "特制code",
+                          "type": "string"
+                        },
+                        "key": {
+                          "description": "特制key",
+                          "type": "string"
+                        },
+                        "quantity": {
+                          "description": "特制数量",
+                          "type": "integer"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "productCode": {
+                "description": "商品code",
+                "type": "string"
+              },
+              "quantity": {
+                "description": "数量",
+                "type": "integer",
+                "minimum": 1
+              },
+              "roundList": {
+                "description": "套餐子项",
+                "items": {
+                  "properties": {
+                    "comboItemList": {
+                      "description": "套餐套餐round下商品",
+                      "items": {
+                        "properties": {
+                          "code": {
+                            "description": "商品编码",
+                            "type": "string"
+                          },
+                          "quantity": {
+                            "description": "商品数量",
+                            "type": "integer",
+                            "minimum": 1
+                          }
+                        },
+                        "type": "object",
+                        "required": [
+                          "code",
+                          "quantity"
+                        ]
+                      },
+                      "type": "array"
+                    },
+                    "round": {
+                      "description": "套餐round",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "round",
+                    "comboItemList"
+                  ]
+                },
+                "type": "array"
+              }
+            },
+            "type": "object",
+            "required": [
+              "productCode",
+              "quantity"
+            ]
+          },
+          "type": "array",
+          "minItems": 1
+        },
+        "needTableware": {
+          "description": "是否需要餐具，true需要，false不需要",
+          "type": "boolean"
+        },
+        "orderType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "remark": {
+          "description": "订单备注（选填，最多50字），如\"无接触配送\"，仅orderType=2场景下需要引导用户填写",
+          "type": "string"
+        },
+        "reservationDate": {
+          "description": "预约场景必传，非预约场景不传。格式:yyyy-MM-dd HH:mm",
+          "type": "string"
+        },
+        "storeCode": {
+          "description": "门店编码（storeCode）, 不能为空",
+          "type": "string"
+        }
+      },
+      "required": [
+        "storeCode",
+        "orderType",
+        "beType",
+        "items",
+        "addressId"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "delivery-create-address",
+    "description": "添加麦乐送配送地址，返回新地址编号。",
+    "inputSchema": {
+      "properties": {
+        "address": {
+          "description": "配送地址",
+          "type": "string"
+        },
+        "addressDetail": {
+          "description": "配送地址门牌号",
+          "type": "string"
+        },
+        "city": {
+          "description": "城市",
+          "type": "string"
+        },
+        "contactName": {
+          "description": "联系人姓名",
+          "type": "string"
+        },
+        "phone": {
+          "description": "要求为11位纯数字",
+          "type": "string"
+        }
+      },
+      "required": [
+        "address",
+        "addressDetail",
+        "city",
+        "contactName",
+        "phone"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "delivery-query-addresses",
+    "description": "查询用户已有的麦乐送配送地址与地址编号。",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "delivery-query-stores",
+    "description": "查询指定地址可配送的麦当劳门店、营业状态和预约时段。麦乐送 beType 为 2。",
+    "inputSchema": {
+      "properties": {
+        "addressId": {
+          "description": "地址ID，来源delivery-query-address",
+          "type": "string"
+        },
+        "beType": {
+          "description": "麦乐送使用 2",
+          "type": "integer",
+          "enum": [
+            2
+          ]
+        }
+      },
+      "required": [
+        "beType",
+        "addressId"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "now-time-info",
+    "description": "查询麦乐送场景当前的时间与时区。",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "order-list",
+    "description": "查询最近的麦乐送订单，包含订单编号、餐品和状态。",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "query-meal-detail",
+    "description": "查询指定门店的餐品详情、套餐可选子项和默认搭配。",
+    "inputSchema": {
+      "properties": {
+        "beCode": {
+          "description": "业务编码，与storeCode 配对使用，从query-nearby-stores或delivery-query-stores返回结果中获取。得来速(beType=5)/外送(orderType=2)/团餐场景必传，到店自取(beType=1)场景不传",
+          "type": "string"
+        },
+        "beType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "code": {
+          "description": "餐品唯一编码，快餐门店内唯一标识单个餐品的编码",
+          "type": "string"
+        },
+        "orderType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "storeCode": {
+          "description": "门店编码（storeCode）, 不能为空",
+          "type": "string"
+        }
+      },
+      "required": [
+        "storeCode",
+        "orderType",
+        "beType",
+        "code"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "query-meals",
+    "description": "查询指定麦乐送门店的分类菜单、商品编码、价格与售罄状态。",
+    "inputSchema": {
+      "properties": {
+        "beCode": {
+          "description": "业务编码，与storeCode 配对使用，从query-nearby-stores或delivery-query-stores返回结果中获取。得来速(beType=5)/外送(orderType=2)/团餐场景必传，到店自取(beType=1)场景不传",
+          "type": "string"
+        },
+        "beType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "orderType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "storeCode": {
+          "description": "门店编码（storeCode）, 不能为空",
+          "type": "string"
+        }
+      },
+      "required": [
+        "storeCode",
+        "orderType",
+        "beType"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "query-my-coupons",
+    "description": "查询当前用户的优惠券。",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
+    "name": "query-order",
+    "description": "按订单编号查询麦乐送订单及其状态。",
+    "inputSchema": {
+      "properties": {
+        "orderId": {
+          "description": "No comments found.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "orderId"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "query-store-coupons",
+    "description": "查询指定门店当前可用的麦乐送优惠券及适用餐品。",
+    "inputSchema": {
+      "properties": {
+        "beCode": {
+          "description": "业务编码，与storeCode 配对使用，从query-nearby-stores或delivery-query-stores返回结果中获取。得来速(beType=5)/外送(orderType=2)/团餐场景必传，到店自取(beType=1)场景不传",
+          "type": "string"
+        },
+        "beType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "orderType": {
+          "description": "麦乐送使用 2",
+          "enum": [
+            2
+          ],
+          "type": "integer"
+        },
+        "storeCode": {
+          "description": "门店编码必须全部由数字组成",
+          "type": "string"
+        }
+      },
+      "required": [
+        "orderType",
+        "beType",
+        "storeCode"
+      ],
+      "type": "object"
+    }
+  }
+]
