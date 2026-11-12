@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from secrets import compare_digest
 
 import anyio
@@ -16,6 +18,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -23,6 +26,9 @@ from starlette.routing import Mount, Route
 
 from sandbox.domains.mcd import McDelivery
 from sandbox.episodes import Domain, EpisodeConflict, EpisodeStore, Fault, HTTP_FAULTS
+
+log = logging.getLogger(__name__)
+
 
 class OpenEpisode(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -43,12 +49,13 @@ def bearer(headers: Headers) -> str:
     return value.strip() if scheme.lower() == "bearer" else ""
 
 
-def create_app(*, admin_token: str | None = None, domains: list[Domain] | None = None) -> Starlette:
+def create_app(*, admin_token: str | None = None, domains: list[Domain] | None = None,
+               archive_dir: Path | None = None) -> Starlette:
     admin_token = admin_token if admin_token is not None else os.environ.get("SANDBOX_ADMIN_TOKEN", "")
     if not admin_token or not admin_token.isascii() or any(not 33 <= ord(char) <= 126 for char in admin_token):
         raise ValueError("set SANDBOX_ADMIN_TOKEN to a nonempty ASCII bearer token")
     registry = {domain.name: domain for domain in (domains if domains is not None else [McDelivery()])}
-    store = EpisodeStore()
+    store = EpisodeStore(archive_dir)
     server = Server("sandbox")
 
     @server.list_tools()
@@ -172,6 +179,8 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
     async def open_episode(request: Request) -> Response:
         if not admin_authenticated(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if request.method == "GET":
+            return JSONResponse({"episodes": store.list()})
         try:
             config = OpenEpisode.model_validate_json(await request.body())
             domain = registry.get(config.domain)
@@ -192,10 +201,31 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
         if not admin_authenticated(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         episode_id = request.path_params["episode_id"]
-        action = request.path_params["action"]
+        action = request.path_params.get("action")
         episode = store.get(episode_id)
         if episode is None:
-            return JSONResponse({"error": "episode not found"}, status_code=404)
+            try:
+                if request.method == "DELETE" and await run_in_threadpool(store.delete_archive, episode_id):
+                    return Response(status_code=204)
+                archived = await run_in_threadpool(store.archived, episode_id)
+            except (OSError, ValueError):
+                log.exception("Could not access episode archive %s", episode_id)
+                return JSONResponse({"error": "episode archive unavailable"}, status_code=503)
+            if archived is None:
+                return JSONResponse({"error": "episode not found"}, status_code=404)
+            if (action, request.method) in {("snapshot", "GET"), ("close", "POST")}:
+                return JSONResponse(archived)
+            if action == "events" and request.method == "GET":
+                return event_stream(archived["calls"])
+            if action in {"reset", "round"} and request.method == "POST":
+                return JSONResponse({"error": "episode is closed"}, status_code=409)
+            return JSONResponse({"error": "unknown episode action"}, status_code=404)
+        if request.method == "DELETE":
+            try:
+                store.delete(episode)
+            except EpisodeConflict as error:
+                return JSONResponse({"error": str(error)}, status_code=409)
+            return Response(status_code=204)
         if request.method == "GET":
             if action == "snapshot":
                 return JSONResponse(episode.snapshot())
@@ -204,7 +234,12 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
         if request.method == "POST":
             try:
                 if action == "close":
-                    return JSONResponse(store.close(episode))
+                    try:
+                        snapshot = await run_in_threadpool(store.close, episode)
+                    except OSError:
+                        log.exception("Could not archive episode %s", episode_id)
+                        return JSONResponse({"error": "could not archive episode"}, status_code=503)
+                    return JSONResponse(snapshot)
                 if action == "reset":
                     episode.reset()
                     return JSONResponse(episode.snapshot())
@@ -234,7 +269,8 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
     return Starlette(
         routes=[
             Route("/admin/catalog", catalog),
-            Route("/admin/episodes", open_episode, methods=["POST"]),
+            Route("/admin/episodes", open_episode, methods=["GET", "POST"]),
+            Route("/admin/episodes/{episode_id}", episode_action, methods=["DELETE"]),
             Route("/admin/episodes/{episode_id}/{action}", episode_action, methods=["GET", "POST"]),
             Mount("/", app=mcp_endpoint),
         ],
@@ -245,8 +281,9 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the sandbox on loopback")
     parser.add_argument("--port", type=int, default=8100)
+    parser.add_argument("--archive-dir", type=Path, help="store closed episode snapshots on disk")
     args = parser.parse_args()
-    uvicorn.run(create_app(), host="127.0.0.1", port=args.port)
+    uvicorn.run(create_app(archive_dir=args.archive_dir), host="127.0.0.1", port=args.port)
 
 
 if __name__ == "__main__":

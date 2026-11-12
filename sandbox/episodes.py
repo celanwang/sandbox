@@ -5,14 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import RLock
 from typing import Literal, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from sandbox.storage import write_atomic
+
 
 SCHEMA_VERSION = 1
 HTTP_FAULTS = {
@@ -76,6 +81,7 @@ class Episode:
         self.lock = RLock()
         self.generation = 0
         self.closed = False
+        self.closing = False
         self.in_flight = 0
 
         tool_names = {tool["name"] for tool in domain.tools}
@@ -115,8 +121,8 @@ class Episode:
             self.fired = set(self.start_faults)
 
     def ensure_idle(self) -> None:
-        if self.in_flight:
-            raise EpisodeConflict("episode has requests in flight")
+        if self.in_flight or self.closing:
+            raise EpisodeConflict("episode has requests in flight or is closing")
 
     def _due(self, tool: str, nth: int) -> list[int]:
         due = []
@@ -224,10 +230,13 @@ class Episode:
 
 
 class EpisodeStore:
-    def __init__(self):
+    def __init__(self, archive_dir: Path | None = None):
         self.episodes: dict[str, Episode] = {}
         self.bindings: dict[str, Episode] = {}
         self.lock = RLock()
+        self.archive_dir = archive_dir
+        if archive_dir is not None:
+            archive_dir.mkdir(parents=True, exist_ok=True)
 
     def create(self, token: str, domain: Domain, scene: str, seed: int, faults: list[Fault]) -> Episode:
         with self.lock:
@@ -250,15 +259,75 @@ class EpisodeStore:
             episode = self.bindings.get(token)
             if episode is not None:
                 with episode.lock:
+                    if episode.closing:
+                        return None
                     episode.in_flight += 1
             return episode
+
+    def list(self) -> list[dict]:
+        with self.lock:
+            rows = [{"episodeId": episode.episode_id, "closed": episode.closed, "domain": episode.domain.name,
+                     "scene": episode.scene_id} for episode in self.episodes.values()]
+            if self.archive_dir is not None:
+                rows.extend({"episodeId": path.stem, "closed": True, "archived": True}
+                            for path in sorted(self.archive_dir.glob("*.json"))
+                            if path.stem not in self.episodes and re.fullmatch(r"[0-9a-f]{32}", path.stem))
+            return rows
+
+    def archive_path(self, episode_id: str) -> Path | None:
+        if self.archive_dir is not None and re.fullmatch(r"[0-9a-f]{32}", episode_id):
+            return self.archive_dir / f"{episode_id}.json"
+        return None
+
+    def archived(self, episode_id: str) -> dict | None:
+        path = self.archive_path(episode_id)
+        if path is None:
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+
+    def delete_archive(self, episode_id: str) -> bool:
+        path = self.archive_path(episode_id)
+        if path is None:
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
+    def delete(self, episode: Episode) -> None:
+        with self.lock:
+            if not episode.closed:
+                raise EpisodeConflict("close the episode before deleting it")
+            self.episodes.pop(episode.episode_id, None)
 
     def close(self, episode: Episode) -> dict:
         with self.lock, episode.lock:
             episode.ensure_idle()
+            snapshot = episode.snapshot()
+            if episode.closed:
+                return snapshot
+            snapshot["closed"] = True
+            episode.closing = True
+        path = self.archive_path(episode.episode_id)
+        try:
+            if path is not None:
+                payload = json.JSONEncoder(ensure_ascii=False).iterencode(snapshot)
+                write_atomic(path, payload)
+        except BaseException:
+            with episode.lock:
+                episode.closing = False
+            raise
+        with self.lock, episode.lock:
             episode.closed = True
+            episode.closing = False
             for token, bound in tuple(self.bindings.items()):
                 if bound is episode:
                     del self.bindings[token]
                     break
-            return episode.snapshot()
+            if path is not None:
+                self.episodes.pop(episode.episode_id, None)
+            return snapshot

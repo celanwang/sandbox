@@ -250,6 +250,18 @@ def test_disconnected_client_records_planned_status_without_response():
     asyncio.run(run())
 
 
+def test_closed_episode_can_be_listed_and_purged(client):
+    run_id = start(client)
+    path = f"/admin/episodes/{run_id}"
+    assert client.get("/admin/episodes").status_code == 401
+    assert client.delete(path, headers=ADMIN).status_code == 409
+    admin(client, run_id, "close", "POST")
+    rows = client.get("/admin/episodes", headers=ADMIN).raise_for_status().json()["episodes"]
+    assert rows == [{"episodeId": run_id, "closed": True, "domain": "mcd", "scene": "lunch"}]
+    assert client.delete(path, headers=ADMIN).status_code == 204
+    assert client.get(f"{path}/snapshot", headers=ADMIN).status_code == 404
+
+
 def test_order_list_preserves_creation_order_on_same_clock(client):
     start(client)
     orders = [body(tool(client, "create-order", ORDER))["data"]["orderId"] for _ in range(12)]
@@ -281,6 +293,44 @@ def test_due_faults_skipped_by_earlier_fault_are_recorded(client):
         {"index": 1, "reason": "transport_fault_selected"},
         {"index": 2, "reason": "business_not_attempted"},
     ]
+
+
+def test_closed_snapshot_survives_new_app_and_can_be_purged(tmp_path):
+    from starlette.testclient import TestClient
+
+    from sandbox.server import create_app
+
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as client:
+        episode = start(client)
+        body(tool(client, "create-order", ORDER))
+        expected = admin(client, episode, "close", "POST").json()
+        assert expected["closed"] and len(expected["state"]["orders"]) == 1
+        assert len(list(tmp_path.iterdir())) == 1
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as client:
+        assert admin(client, episode, "snapshot").json() == expected
+        assert admin(client, episode, "close", "POST").json() == expected
+        assert [json.loads(line) for line in admin(client, episode, "events").text.splitlines()] == expected["calls"]
+        assert client.delete(f"/admin/episodes/{episode}", headers=ADMIN).status_code == 204
+        assert client.get(f"/admin/episodes/{episode}/snapshot", headers=ADMIN).status_code == 404
+
+
+def test_archive_failure_preserves_episode_and_can_retry(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from sandbox.server import create_app
+
+    def fail(path, payload):
+        raise OSError("test archive write failure")
+
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as client:
+        episode = start(client)
+        with monkeypatch.context() as patch:
+            patch.setattr("sandbox.episodes.write_atomic", fail)
+            result = client.post(f"/admin/episodes/{episode}/close", headers=ADMIN)
+            assert result.status_code == 503
+        assert not admin(client, episode, "snapshot").json()["closed"]
+        assert body(tool(client, "delivery-query-addresses"))["success"] is True
+        assert admin(client, episode, "close", "POST").json()["closed"] is True
 
 
 def test_order_accepts_available_future_reservation(client):
