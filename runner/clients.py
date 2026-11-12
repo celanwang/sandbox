@@ -11,7 +11,10 @@ class Iris:
         return self.http.post("/chat", json={**identity, "prompt": prompt}).raise_for_status().text
 
     def state(self, identity: dict) -> dict:
-        return self.http.get("/agent/state", params=identity).raise_for_status().json()
+        state = self.http.get("/agent/state", params=identity).raise_for_status().json()
+        if not isinstance(state, dict) or not isinstance(state.get("tasks"), list):
+            raise ValueError("Iris returned an invalid agent state")
+        return state
 
     def confirm(self, identity: dict, approval: dict, approved: bool) -> dict:
         return self.http.post("/agent/confirm", json={
@@ -22,7 +25,10 @@ class Iris:
         }).raise_for_status().json()
 
     def trace(self, identity: dict) -> list[dict]:
-        return self.http.get("/trace", params=identity).raise_for_status().json()
+        events = self.http.get("/trace", params=identity).raise_for_status().json()
+        if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
+            raise ValueError("Iris returned an invalid trace")
+        return events
 
 
 def pending_approvals(state: dict) -> list[dict]:

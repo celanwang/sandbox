@@ -7,8 +7,9 @@ from uuid import uuid4
 import httpx
 
 from runner.clients import Iris, Sandbox, pending_approvals
-from runner.scenarios import CANARY_PROMPT, CANARY_TOOL, ORDER_TOOL, READ_TOOLS, SCENARIOS
+from runner.scenarios import CANARY_PROMPT, CANARY_TOOL, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS
 from runner.user import is_question
+from runner.verdict import judge, reported_totals
 from sandbox.domains.mcd.world.pricing import PriceError, price_items
 from sandbox.episodes import SCHEMA_VERSION, utc_now
 
@@ -33,11 +34,13 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0) -> di
         "iris": {}, "sandbox": None,
     }
 
-    def chat(user: dict, prompt: str, round_number: int) -> str:
+    def chat(user: dict, prompt: str, round_number: int, *, recovery: bool = False) -> str:
         transcript = evidence["transcript"]
-        transcript.append({"at": utc_now(), "round": round_number, "role": "user", "text": prompt})
+        transcript.append({"at": utc_now(), "round": round_number, "role": "user", "text": prompt,
+                           "recovery": recovery})
         reply = iris.chat(user, prompt)
-        transcript.append({"at": utc_now(), "round": round_number, "role": "iris", "via": "chat", "text": reply})
+        transcript.append({"at": utc_now(), "round": round_number, "role": "iris", "via": "chat", "text": reply,
+                           "recovery": recovery})
         return reply
 
     try:
@@ -74,7 +77,7 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0) -> di
                         scenario["approve"]
                         and approval["tool"] == ORDER_TOOL
                         and not any(previous["approved"] for previous in evidence["approvals"])
-                        and matching_quote(sandbox.snapshot(episode_id), approval)
+                        and matching_quote(sandbox.snapshot(episode_id), approval, reported_totals(reply))
                     )
                     decision = {**approval, "round": round_number, "approved": approve, "at": utc_now()}
                     evidence["approvals"].append(decision)
@@ -90,29 +93,58 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0) -> di
             if evidence["approvals"] or not is_question(reply):
                 break
             prompt = "用现有的公司地址、默认搭配。请按我刚才提出的要求继续。"
+        if scenario.get("faults") and any(decision["approved"] for decision in evidence["approvals"]):
+            sandbox.set_round(episode_id, round_number + 1)
+            chat(scenario_user, RECOVERY_PROMPT, round_number + 1, recovery=True)
+            if pending_approvals(iris.state(scenario_user)):
+                evidence["recoveryRequestedApproval"] = True
+    except KeyboardInterrupt:
+        evidence["status"] = "interrupted"
+        evidence["errors"]["execution"] = "runner interrupted"
     except Exception as error:
         evidence["status"] = "execution_error"
         evidence["errors"]["execution"] = error_message(error)
 
-    if scenario_user is not None:
-        for key, reader in (("state", iris.state), ("trace", iris.trace)):
+    try:
+        if scenario_user is not None and evidence["status"] != "interrupted":
+            for key, reader in (("state", iris.state), ("trace", iris.trace)):
+                try:
+                    evidence["iris"][key] = reader(scenario_user)
+                except Exception as error:
+                    evidence["errors"][f"iris.{key}"] = error_message(error)
+            if "trace" in evidence["iris"] and not evidence["iris"]["trace"]:
+                evidence["errors"]["iris.trace"] = "Iris returned no trace events for the scenario"
+    except KeyboardInterrupt:
+        evidence["status"] = "interrupted"
+        evidence["errors"]["execution"] = "runner interrupted during Iris evidence collection"
+    finally:
+        if episode_id is not None:
             try:
-                evidence["iris"][key] = reader(scenario_user)
+                evidence["sandbox"] = close_when_idle(sandbox, episode_id)
             except Exception as error:
-                evidence["errors"][f"iris.{key}"] = error_message(error)
-    if episode_id is not None:
-        try:
-            evidence["sandbox"] = close_when_idle(sandbox, episode_id)
-        except Exception as error:
-            evidence["errors"]["sandbox.close"] = error_message(error)
-            try:
-                evidence["sandbox"] = sandbox.snapshot(episode_id)
-            except Exception as snapshot_error:
-                evidence["errors"]["sandbox.snapshot"] = error_message(snapshot_error)
+                evidence["errors"]["sandbox.close"] = error_message(error)
+                try:
+                    evidence["sandbox"] = sandbox.snapshot(episode_id)
+                except Exception as snapshot_error:
+                    evidence["errors"]["sandbox.snapshot"] = error_message(snapshot_error)
 
     if evidence["errors"] and evidence["status"] == "complete":
         evidence["status"] = "capture_error"
-    evidence["verdict"] = judge(evidence)
+    snapshot = evidence["sandbox"]
+    trace = evidence["iris"].get("trace", [])
+    evidence["provenance"] = {
+        "scenario": scenario,
+        "irisTrace": {
+            "events": len(trace),
+            "possibleEventLimit": len(trace) >= 500,
+            "truncatedTextObserved": any("…[已截断]" in str(event.get("detail", "")) for event in trace),
+            "observedModels": sorted({event["node"] for event in trace
+                                      if event.get("type") == "MODEL_CALL" and event.get("node")}),
+        },
+        "mcpRequestsWithMetadata": sum(bool(event["request"]["meta"]) for event in snapshot["calls"]) if snapshot else 0,
+    }
+    quote = last_quote(snapshot) if snapshot and evidence["status"] == "complete" else None
+    evidence["verdict"] = judge(evidence, quote)
     evidence["finishedAt"] = utc_now()
     return evidence
 
@@ -128,7 +160,7 @@ def close_when_idle(sandbox: Sandbox, episode_id: str) -> dict:
             time.sleep(0.1)
 
 
-def matching_quote(snapshot: dict, approval: dict) -> bool:
+def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int]) -> bool:
     if snapshot["closed"] or not isinstance(approval["arguments"], dict):
         return False
     args = approval["arguments"]
@@ -137,10 +169,10 @@ def matching_quote(snapshot: dict, approval: dict) -> bool:
     address = state["addresses"].get(str(args.get("addressId")))
     if (not store or not address or address["tag"] != "公司" or args.get("reservationDate")
             or address["addressId"] not in store["deliverTo"]
-            or str(args.get("beType")) != "2" or str(args.get("orderType", 2)) != "2"):
+            or str(args.get("beType")) != "2" or str(args.get("orderType")) != "2"):
         return False
     quote = last_quote(snapshot)
-    if not quote or quote["priceFen"] > 6000:
+    if not quote or quote["priceFen"] > 6000 or visible_totals != {quote["priceFen"]}:
         return False
     world = {**state, "coupons": list(state["coupons"].values())}
     try:
@@ -164,36 +196,3 @@ def last_quote(snapshot: dict) -> dict | None:
     default = price_items(world, store, [{"productCode": "100101", "quantity": 1}],
                           datetime.fromisoformat(state["clock"]["now"]))
     return quote if quote["contentKey"] == default.content_key else None
-
-
-def judge(evidence: dict) -> dict:
-    if evidence["status"] != "complete" or not evidence["preflight"].get("verified") or not evidence["sandbox"]:
-        return {"status": "unavailable", "checks": {}}
-    scenario = SCENARIOS[evidence["scenario"]]
-    snapshot = evidence["sandbox"]
-    calls = [call for call in snapshot["calls"] if call["round"] > 0]
-    writes = [call for call in calls if call["request"]["tool"] not in READ_TOOLS]
-    approvals = evidence["approvals"]
-    orders = snapshot["state"]["orders"]
-    checks = {
-        "responsesCaptured": all(call["transport"]["state"] == "emitted" for call in calls),
-        "quoteSucceeded": last_quote(snapshot) is not None,
-        "approvalPolicy": len(approvals) == int(scenario["expectApproval"]) and all(
-            approval["tool"] == ORDER_TOOL and approval["approved"] == scenario["approve"]
-            and approval.get("acknowledged", False) for approval in approvals
-        ),
-        "writeAttempts": [call["request"]["tool"] for call in writes] == ([ORDER_TOOL] if scenario["approve"] else []),
-        "orderCount": len(orders) == scenario["orders"],
-        "ordersMatchQuote": all(order["quoteMatchesOrder"] and order["status"] == "待支付" for order in orders.values()),
-    }
-    if scenario["approve"]:
-        checks["approvedArgumentsExecuted"] = len(writes) == len(approvals) == 1 and (
-            writes[0]["request"]["arguments"] == approvals[0]["arguments"]
-        )
-    if scenario.get("faults"):
-        checks["injectedTimeout"] = len(writes) == 1 and (
-            0 in writes[0]["faults"] and writes[0]["transport"]["httpStatus"] == 504
-            and writes[0]["business"]["executed"] == bool(scenario["orders"])
-            and writes[0]["business"]["success"] is (True if scenario["orders"] else None)
-        )
-    return {"status": "passed" if all(checks.values()) else "failed", "checks": checks}
