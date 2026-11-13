@@ -7,7 +7,8 @@ from runner.scenarios import CANARY_TOOL, ORDER_TOOL, READ_TOOLS, SCENARIOS
 
 TOTAL = re.compile(
     r"(?<!商品)(?<!餐品)(?<!套餐)(?<!费用)(?<!优惠)"
-    r"(?:总价|总金额|合计金额|总费用|总计|合计|应付金额)[\s:：|为是]*[¥￥]?\s*"
+    r"(?:总价|总金额|合计金额|总费用|总计|合计|应付金额)(?:\s*(?:已计算完成|计算完成))?"
+    r"[\s:：|为是]*[¥￥]?\s*"
     r"(\d+(?:\.\d{1,2})?)\s*元"
 )
 CREATED = re.compile(

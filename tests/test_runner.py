@@ -10,6 +10,7 @@ from runner.__main__ import save
 from runner.clients import Iris, Sandbox
 from runner.episode import run_episode
 from runner.scenarios import RECOVERY_PROMPT, SCENARIOS
+from runner.verdict import reported_totals
 
 
 class FakeIris:
@@ -219,6 +220,12 @@ def test_wrong_extra_order_number_fails_even_with_correct_receipt(client, sandbo
         evidence = run_episode("timeout-after", Iris(iris_http), sandbox_client)
     assert evidence["verdict"]["checks"]["readOnlyRecovery"] is True
     assert evidence["verdict"]["checks"]["reportedRecovery"] is False
+
+
+def test_visible_total_accepts_completed_calculation_without_treating_budget_as_price():
+    assert reported_totals("总价计算完成：53.90 元。总价在 60 元预算内。") == {5390}
+    assert reported_totals("商品总价计算完成：46 元，配送费 6 元。") == set()
+    assert reported_totals("总价计算完成：53.90 元。总价：54.90 元。") == {5390, 5490}
 
 
 def test_wrong_visible_quote_prevents_approval(client, sandbox_client):
