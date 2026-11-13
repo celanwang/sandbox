@@ -42,6 +42,8 @@ curl -fsS http://127.0.0.1:8100/mcp \
 
 ## Run workflows with Iris
 
+The Iris engineering evaluator can use the McDelivery `engineering` fixture for its existing dining cases. It keeps the original test data and adds address updates and coupon claiming to the tools exposed in that fixture. Run it from the Iris checkout with `python3.11 mock/run_eval.py --sandbox-repo /path/to/sandbox`. The evaluator opens one isolated episode per case and saves its final snapshot with the step results.
+
 Start a dedicated Iris test instance with its own PostgreSQL, Redis, and model configuration. Generate an episode ID and token before launching Iris, and use the same values in the Iris and Runner terminals.
 
 ```sh

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Support the existing Iris dining evaluation cases through a McDelivery fixture with address updates and coupon claims.
+
 - Add a synthetic McDelivery MCP service with 13 tools for delivery, pricing, and orders.
 - Manage isolated episodes, inject business and transport faults, and export state snapshots and call traces.
 - Run scripted Iris scenarios and save dialogue, approvals, and sandbox evidence.
