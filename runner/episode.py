@@ -9,11 +9,10 @@ import httpx
 
 from monitor import Recognizer
 from runner.clients import Iris, Sandbox, pending_approvals
-from runner.interactions import LEGACY_REPLY, observe
+from runner.interactions import POLICY_VERSION, keyword_actions, observe
 from runner.scenarios import (
     CANARY_PROMPT, CANARY_TOOL, DEFAULT_QUOTE_ITEMS, ORDER_BUDGET_FEN, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS,
 )
-from runner.user import is_question
 from runner.verdict import judge, preflight_retained, recovery_evidence, reported_totals
 from sandbox.domains.mcd.world.pricing import PriceError, price_items
 from sandbox.episodes import SCHEMA_VERSION, utc_now
@@ -48,7 +47,7 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
         "schemaVersion": SCHEMA_VERSION, "runId": episode_id, "scenario": name, "seed": seed, "startedAt": utc_now(),
         "status": "complete", "errors": {}, "preflight": {}, "transcript": [], "approvals": [],
         "iris": {}, "sandbox": None,
-        "monitor": {"mode": monitor_mode, "decisions": [], "deliveredActionIds": []},
+        "monitor": {"mode": monitor_mode, "policyVersion": POLICY_VERSION, "decisions": [], "deliveredActionIds": []},
     }
 
     def record_message(round_number: int, role: str, text: str, **fields) -> dict:
@@ -137,15 +136,18 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                     raise RuntimeError("Iris exceeded the approval limit")
             if evidence["approvals"]:
                 break
-            legacy_would_reply = is_question(reply)
             available_actions = [action for action in actions if action["actionId"] not in delivered_actions]
-            if actions and monitor_mode == "active" and not available_actions:
+            if not available_actions:
                 break
-            if available_actions and recognizer is not None and monitor_mode != "off":
+            baseline = keyword_actions(reply, available_actions)
+            chosen = baseline
+            if recognizer is not None and monitor_mode != "off":
                 decision, selected = observe(recognizer, evidence["transcript"], available_actions)
-                decision["legacyWouldReply"] = legacy_would_reply
+                decision["legacyWouldReply"] = bool(baseline)
+                decision["baselineActionIds"] = [action["actionId"] for action in baseline]
                 decision["action"] = {"kind": "stop", "actionIds": []}
                 evidence["monitor"]["decisions"].append(decision)
+                follow_up = decision
                 if monitor_mode == "active":
                     status = decision["recognition"]["status"]
                     if status != "matched":
@@ -153,21 +155,18 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                         if status in {"uncertain", "unavailable"}:
                             evidence["status"] = f"monitor_{status}"
                         break
-                    if round_number == max_rounds:
-                        decision["action"]["reason"] = "round_limit"
-                        break
-                    decision["action"] = {"kind": "scripted_reply", "actionIds": decision["proposedActionIds"]}
-                    follow_up = decision
-                    prompt = " ".join(action["reply"] for action in selected)
-                    continue
-                if legacy_would_reply and round_number < max_rounds:
-                    decision["action"] = {"kind": "legacy_reply", "actionIds": []}
-                    follow_up = decision
-                else:
-                    decision["action"]["reason"] = "round_limit" if legacy_would_reply else "legacy_no_question"
-            if not legacy_would_reply or round_number == max_rounds:
+                    chosen = selected
+            if not chosen or round_number == max_rounds:
+                if follow_up is not None:
+                    follow_up["action"]["reason"] = "round_limit" if chosen else "baseline_no_match"
                 break
-            prompt = LEGACY_REPLY
+            if follow_up is None:
+                follow_up = {}
+            follow_up["action"] = {
+                "kind": "scripted_reply",
+                "actionIds": [action["actionId"] for action in chosen],
+            }
+            prompt = " ".join(action["reply"] for action in chosen)
         if scenario.get("faults") and any(decision["approved"] for decision in evidence["approvals"]):
             sandbox.set_round(episode_id, round_number + 1, generation=generation)
             chat(scenario_user, RECOVERY_PROMPT, round_number + 1, recovery=True)

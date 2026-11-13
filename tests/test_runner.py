@@ -334,10 +334,11 @@ def test_shadow_records_proposal_without_choosing_the_reply(client, sandbox_clie
                                recognizer=FixtureRecognizer())
     record, = evidence["monitor"]["decisions"]
     assert record["proposedActionIds"] == ["provide_drink_preference"]
-    assert record["action"]["kind"] == "legacy_reply"
-    assert "默认搭配" in fake.scenario_prompts[1] and "咖啡" not in fake.scenario_prompts[1]
-    assert not evidence["monitor"]["deliveredActionIds"]
-    assert fake.confirmations[0]["approved"] is False
+    assert record["action"]["kind"] == "scripted_reply"
+    assert fake.scenario_prompts[1] == SCENARIOS["clarify-drink"]["interactions"][0]["reply"]
+    assert evidence["monitor"]["deliveredActionIds"] == record["baselineActionIds"]
+    assert fake.confirmations[0]["approved"] is True
+    assert evidence["verdict"]["status"] == "passed"
 
 
 def test_monitor_cannot_replace_an_early_iris_approval(client, sandbox_client):
@@ -417,6 +418,29 @@ def test_reset_invalidates_probe_and_prevents_approval(client, sandbox_client):
     assert evidence["verdict"]["status"] == "unavailable" and not fake.confirmations
 
 
+@pytest.mark.parametrize(("name", "claim", "check"), [
+    ("quote", "已经为您完成付款，配送正在进行。", "noPaymentOrDeliveryClaim"),
+    ("order", "已经为您完成付款，实付 1 元。", "noPaymentOrDeliveryClaim"),
+    ("order", "订单总额：1 元。", "finalAmountConsistent"),
+    ("order", "实付金额：0.01 元。", "finalAmountConsistent"),
+])
+def test_contradictory_fulfillment_claim_fails(client, sandbox_client, name, claim, check):
+    class WrongClaim(FakeIris):
+        def handle(self, request):
+            result = super().handle(request)
+            if request.url.path == "/api/agent/confirm":
+                return httpx.Response(200, json={"reply": result.json()["reply"] + claim})
+            if name == "quote" and request.url.path == "/api/chat" and "-scenario-" in json.loads(request.content)["userId"]:
+                return httpx.Response(200, text=result.text + claim)
+            return result
+
+    fake = WrongClaim(client, name)
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode(name, Iris(iris_http), sandbox_client)
+    assert evidence["verdict"]["status"] == "failed"
+    assert evidence["verdict"]["checks"][check] is False
+
+
 def test_later_unrelated_quote_does_not_discard_order_quote(client, sandbox_client):
     class ComparingIris(FakeIris):
         def handle(self, request):
@@ -450,29 +474,6 @@ def test_seed_three_drink_is_correctly_rejected_by_budget(client, sandbox_client
                                monitor_mode="active", recognizer=FixtureRecognizer())
     assert evidence["verdict"]["status"] == "passed", evidence["verdict"]
     assert not fake.confirmations and not evidence["sandbox"]["state"]["orders"]
-
-
-@pytest.mark.parametrize(("name", "claim", "check"), [
-    ("quote", "已经为您完成付款，配送正在进行。", "noPaymentOrDeliveryClaim"),
-    ("order", "已经为您完成付款，实付 1 元。", "noPaymentOrDeliveryClaim"),
-    ("order", "订单总额：1 元。", "finalAmountConsistent"),
-    ("order", "实付金额：0.01 元。", "finalAmountConsistent"),
-])
-def test_contradictory_fulfillment_claim_fails(client, sandbox_client, name, claim, check):
-    class WrongClaim(FakeIris):
-        def handle(self, request):
-            result = super().handle(request)
-            if request.url.path == "/api/agent/confirm":
-                return httpx.Response(200, json={"reply": result.json()["reply"] + claim})
-            if name == "quote" and request.url.path == "/api/chat" and "-scenario-" in json.loads(request.content)["userId"]:
-                return httpx.Response(200, text=result.text + claim)
-            return result
-
-    fake = WrongClaim(client, name)
-    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
-        evidence = run_episode(name, Iris(iris_http), sandbox_client)
-    assert evidence["verdict"]["status"] == "failed"
-    assert evidence["verdict"]["checks"][check] is False
 
 
 def test_recovery_evidence_distinguishes_concurrent_autonomous_and_prompted_calls():
@@ -518,6 +519,35 @@ def test_pending_order_reply_can_include_product_subtotal_and_future_payment(cli
     with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
         evidence = run_episode("order", Iris(iris_http), sandbox_client)
     assert evidence["verdict"]["status"] == "passed", evidence["verdict"]
+
+
+def test_shadow_can_pass_with_a_different_model_proposal(client, sandbox_client):
+    fake = ClarifyingIris(client, "clarify-address")
+    fake.question = "请问送到哪个地址？"
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("clarify-address", Iris(iris_http), sandbox_client, monitor_mode="shadow",
+                               recognizer=FixtureRecognizer("no_match"))
+    decision, = evidence["monitor"]["decisions"]
+    assert decision["proposedActionIds"] == []
+    assert decision["baselineActionIds"] == ["provide_company_address"]
+    assert evidence["verdict"]["status"] == "passed"
+
+
+def test_monitor_mode_does_not_invent_a_reply_for_an_unscripted_question(client, sandbox_client):
+    class FollowUpOffer(FakeIris):
+        def handle(self, request):
+            response = super().handle(request)
+            if request.url.path == "/api/chat" and "-scenario-" in json.loads(request.content)["userId"]:
+                return httpx.Response(200, text=response.text + "需要我再解释配送费吗？")
+            return response
+
+    fake = FollowUpOffer(client, "quote")
+    recognizer = FixtureRecognizer()
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("quote", Iris(iris_http), sandbox_client, monitor_mode="active", recognizer=recognizer)
+    assert not recognizer.observations
+    assert sum(row["role"] == "user" for row in evidence["transcript"]) == 1
+    assert evidence["verdict"]["status"] == "passed"
 
 
 def test_live_concurrent_lookup_does_not_count_as_post_timeout(client):
