@@ -1,7 +1,7 @@
 """Project the raw evidence into a report for regression review."""
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 from sandbox.storage import write_atomic
 
@@ -33,9 +33,11 @@ def summarize(evidence: dict) -> dict:
         "scenario": evidence["scenario"],
         "seed": evidence["seed"],
         "irisRevision": provenance.get("irisRevision"),
+        "irisWorkingTreeDirty": provenance.get("irisWorkingTreeDirty"),
         "sandboxSource": provenance.get("runnerSource"),
         "irisModels": trace["observedModels"],
         "monitorMode": monitor["mode"],
+        "faultPlan": provenance["scenario"].get("faults", []),
         "query": next((row["text"] for row in transcript if row["role"] == "user"), None),
         "interactions": interactions,
         "finalReply": next((row["text"] for row in reversed(transcript) if row["role"] == "iris"), None),

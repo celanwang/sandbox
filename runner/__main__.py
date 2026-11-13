@@ -39,6 +39,20 @@ def source_revision() -> dict | None:
         return None
 
 
+def run_case(scenario: str, *, iris_url: str, sandbox_url: str, admin_token: str, mcp_token: str,
+             episode_id: str | None, seed: int, monitor_mode: str, key: str) -> dict:
+    with (
+        httpx.Client(base_url=iris_url.rstrip("/"), timeout=httpx.Timeout(10, read=300), trust_env=False) as iris_http,
+        httpx.Client(base_url=sandbox_url.rstrip("/") + "/admin", timeout=10, trust_env=False,
+                     headers={"Authorization": f"Bearer {admin_token}"}) as sandbox_http,
+        (model_client(key) if key else nullcontext(None)) as monitor_http,
+    ):
+        iris, sandbox = Iris(iris_http), Sandbox(sandbox_http, mcp_token)
+        recognizer = QwenRecognizer(monitor_http) if monitor_http is not None else None
+        return run_episode(scenario, iris, sandbox, seed=seed, monitor_mode=monitor_mode,
+                           recognizer=recognizer, requested_episode_id=episode_id)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", nargs="?", choices=SCENARIOS, default="order")
@@ -63,16 +77,9 @@ def main() -> int:
     batch = args.out / uuid4().hex
     batch.mkdir(parents=True)
     source = source_revision()
-    with (
-        httpx.Client(base_url=args.iris.rstrip("/"), timeout=httpx.Timeout(10, read=300), trust_env=False) as iris_http,
-        httpx.Client(base_url=args.sandbox.rstrip("/") + "/admin", timeout=10, trust_env=False,
-                     headers={"Authorization": f"Bearer {admin_token}"}) as sandbox_http,
-        (model_client(key) if key else nullcontext(None)) as monitor_http,
-    ):
-        iris, sandbox = Iris(iris_http), Sandbox(sandbox_http, mcp_token)
-        recognizer = QwenRecognizer(monitor_http) if monitor_http is not None else None
-        evidence = run_episode(args.scenario, iris, sandbox, seed=args.seed, monitor_mode=args.monitor,
-                               recognizer=recognizer, requested_episode_id=args.episode_id)
+    evidence = run_case(args.scenario, iris_url=args.iris, sandbox_url=args.sandbox, admin_token=admin_token,
+                        mcp_token=mcp_token, episode_id=args.episode_id, seed=args.seed,
+                        monitor_mode=args.monitor, key=key)
     evidence["provenance"].update(runnerSource=source, irisRevision=args.iris_revision)
     directory = batch / f"01-{args.scenario}"
     save(directory, evidence)
