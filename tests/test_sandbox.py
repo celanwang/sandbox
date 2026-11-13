@@ -386,3 +386,13 @@ def test_retired_token_remains_retired_after_archived_episode_is_deleted(tmp_pat
         assert http.delete(f"/admin/episodes/{episode}", headers=ADMIN).status_code == 204
     with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
         assert http.post("/admin/episodes", headers=ADMIN, json={"token": MCP_TOKEN}).status_code == 409
+
+
+def test_reservation_is_consistent_in_order_receipts(client):
+    start(client)
+    slot = "2026-11-10 13:00"
+    created = body(tool(client, "create-order", {**ORDER, "reservationDate": slot}))["data"]
+    queried = body(tool(client, "query-order", {"orderId": created["orderId"]}))["data"]
+    for receipt in (created["orderDetail"], queried):
+        assert receipt["deliveryInfo"]["deliveryType"] == "预约配送"
+        assert receipt["deliveryInfo"]["expectDeliveryTime"] == slot

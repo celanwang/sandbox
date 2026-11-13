@@ -23,6 +23,7 @@ RECOVERY_PROMPT = (
     "若查到匹配记录，请回复订单号和状态；若查不到，请说明当前查不到，无法确认提交结果。"
 )
 DEFAULT_QUOTE_ITEMS = [{"productCode": "100101", "quantity": 1}]
+ORDER_BUDGET_FEN = 6000
 INTENTS = {
     intent.intentId: intent for intent in (
         Intent("request_delivery_address", "请用户提供配送地址，或从多个已有地址中选一个。",
@@ -68,7 +69,7 @@ SCENARIOS = {
         "prompt": ORDER_PROMPT.replace(
             "按默认搭配", "饮料想换一种，请先问我选什么，等我回答后再算价和发起审批"
         ),
-        "approve": True, "expectApproval": True, "orders": 1,
+        "approve": True, "expectApproval": True, "orders": 1, "budgetFen": ORDER_BUDGET_FEN,
         "quoteAfterInteraction": True,
         "quoteItems": [{
             **DEFAULT_QUOTE_ITEMS[0],

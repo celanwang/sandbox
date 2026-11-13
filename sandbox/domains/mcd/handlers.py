@@ -251,12 +251,14 @@ def create_order(ep: Episode, args: dict) -> Result:
         priced = price_items(ep.world, store, args["items"], now, bool(args.get("needTableware")))
     except PriceError as e:
         return _fail(ep, str(e))
+    last_quote = next((quote for quote in reversed(ep.world["quotes"])
+                       if quote["contentKey"] == priced.content_key and quote["priceFen"] == priced.price), None)
     n = len(ep.world["orders"]) + 1
     order = O.build_order(
         order_id=O.new_order_id(ep.scene_id, ep.seed, n),
         pay_id=O.digits(f"pay:{ep.scene_id}:{ep.seed}:{n}", 20),
         store=store, address=address, priced=priced, create_time=ep.world["clock"], remark=remark,
-        last_quote=dict(ep.world["quotes"][-1]) if ep.world["quotes"] else None,
+        last_quote=dict(last_quote) if last_quote else None,
     )
     order["reservationDate"] = reservation or None
     order["createdAtCallSeq"] = ep.seq + 1

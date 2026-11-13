@@ -11,7 +11,7 @@ from monitor import Recognizer
 from runner.clients import Iris, Sandbox, pending_approvals
 from runner.interactions import LEGACY_REPLY, observe
 from runner.scenarios import (
-    CANARY_PROMPT, CANARY_TOOL, DEFAULT_QUOTE_ITEMS, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS,
+    CANARY_PROMPT, CANARY_TOOL, DEFAULT_QUOTE_ITEMS, ORDER_BUDGET_FEN, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS,
 )
 from runner.user import is_question
 from runner.verdict import judge, preflight_retained, reported_totals
@@ -123,7 +123,8 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                         and not any(previous["approved"] for previous in evidence["approvals"])
                         and required_actions <= delivered_actions.keys()
                         and matching_quote(sandbox.snapshot(episode_id, generation=generation), approval, reported_totals(reply),
-                                           quote_items, min_round=min_quote_round)
+                                           quote_items, min_round=min_quote_round,
+                                           budget_fen=scenario.get("budgetFen", ORDER_BUDGET_FEN))
                     )
                     decision = {**approval, "round": round_number, "approved": approve, "at": utc_now()}
                     evidence["approvals"].append(decision)
@@ -221,7 +222,9 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
         },
         "mcpRequestsWithMetadata": sum(bool(event["request"]["meta"]) for event in snapshot["calls"]) if snapshot else 0,
     }
-    quote = (last_quote(snapshot, quote_items, min_round=min_quote_round)
+    approved_store = next((str(row["arguments"].get("storeCode")) for row in evidence["approvals"]
+                           if row["approved"]), None)
+    quote = (last_quote(snapshot, quote_items, min_round=min_quote_round, store_code=approved_store)
              if snapshot and evidence["status"] == "complete" else None)
     evidence["verdict"] = judge(evidence, quote)
     evidence["finishedAt"] = utc_now()
@@ -241,7 +244,8 @@ def close_when_idle(sandbox: Sandbox, episode_id: str, generation: int) -> dict:
 
 
 def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int],
-                   quote_items: list[dict] = DEFAULT_QUOTE_ITEMS, *, min_round: int = 1) -> bool:
+                   quote_items: list[dict] = DEFAULT_QUOTE_ITEMS, *, min_round: int = 1,
+                   budget_fen: int = ORDER_BUDGET_FEN) -> bool:
     if snapshot["closed"] or not isinstance(approval["arguments"], dict):
         return False
     args = approval["arguments"]
@@ -252,8 +256,8 @@ def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int],
             or address["addressId"] not in store["deliverTo"]
             or str(args.get("beType")) != "2" or str(args.get("orderType")) != "2"):
         return False
-    quote = last_quote(snapshot, quote_items, min_round=min_round)
-    if not quote or quote["priceFen"] > 6000 or visible_totals != {quote["priceFen"]}:
+    quote = last_quote(snapshot, quote_items, min_round=min_round, store_code=store["storeCode"])
+    if not quote or quote["priceFen"] > budget_fen or visible_totals != {quote["priceFen"]}:
         return False
     world = {**state, "coupons": list(state["coupons"].values())}
     try:
@@ -264,12 +268,17 @@ def matching_quote(snapshot: dict, approval: dict, visible_totals: set[int],
     return price.content_key == quote["contentKey"] and price.price == quote["priceFen"]
 
 
-def last_quote(snapshot: dict, quote_items: list[dict] = DEFAULT_QUOTE_ITEMS, *, min_round: int = 1) -> dict | None:
+def last_quote(snapshot: dict, quote_items: list[dict] = DEFAULT_QUOTE_ITEMS, *, min_round: int = 1,
+               store_code: str | None = None) -> dict | None:
     state = snapshot["state"]
-    quote = max(state["quotes"].values(), key=lambda value: value["callSeq"], default=None)
-    if not quote or quote["round"] < min_round:
-        return None
-    store = state["stores"][quote["storeCode"]]
     world = {**state, "coupons": list(state["coupons"].values()), "soldOut": {}}
-    expected = price_items(world, store, quote_items, datetime.fromisoformat(state["clock"]["now"]))
-    return quote if quote["contentKey"] == expected.content_key else None
+    now = datetime.fromisoformat(state["clock"]["now"])
+    quotes = sorted(state["quotes"].values(), key=lambda value: value["callSeq"], reverse=True)
+    for quote in quotes:
+        if quote["round"] < min_round or store_code is not None and quote["storeCode"] != store_code:
+            continue
+        store = state["stores"][quote["storeCode"]]
+        expected = price_items(world, store, quote_items, now)
+        if quote["contentKey"] == expected.content_key and quote["priceFen"] == expected.price:
+            return quote
+    return None

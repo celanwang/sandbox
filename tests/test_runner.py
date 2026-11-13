@@ -415,3 +415,38 @@ def test_reset_invalidates_probe_and_prevents_approval(client, sandbox_client):
     assert evidence["preflight"]["verified"] is True
     assert evidence["sandbox"]["generation"] == 2 and evidence["sandbox"]["closed"] is False
     assert evidence["verdict"]["status"] == "unavailable" and not fake.confirmations
+
+
+def test_later_unrelated_quote_does_not_discard_order_quote(client, sandbox_client):
+    class ComparingIris(FakeIris):
+        def handle(self, request):
+            response = super().handle(request)
+            if request.url.path == "/api/chat" and "-scenario-" in json.loads(request.content)["userId"]:
+                comparison = {**ORDER, "items": [{"productCode": "100102", "quantity": 1}]}
+                tool(client, "calculate-price", comparison).raise_for_status()
+            return response
+
+    fake = ComparingIris(client, "order")
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("order", Iris(iris_http), sandbox_client)
+    assert evidence["verdict"]["status"] == "passed"
+    order, = evidence["sandbox"]["state"]["orders"].values()
+    assert order["lastQuote"]["items"][0]["productCode"] == "100101"
+
+
+def test_seed_three_drink_is_correctly_rejected_by_budget(client, sandbox_client):
+    class BudgetAwareIris(ClarifyingIris):
+        def handle(self, request):
+            response = super().handle(request)
+            if request.url.path == "/api/chat" and len(self.scenario_prompts) == 2:
+                user_id = json.loads(request.content)["userId"]
+                self.pending.pop(user_id, None)
+                assert "61.90" in response.text
+            return response
+
+    fake = BudgetAwareIris(client, "clarify-drink")
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("clarify-drink", Iris(iris_http), sandbox_client, seed=3,
+                               monitor_mode="active", recognizer=FixtureRecognizer())
+    assert evidence["verdict"]["status"] == "passed", evidence["verdict"]
+    assert not fake.confirmations and not evidence["sandbox"]["state"]["orders"]

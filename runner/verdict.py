@@ -84,7 +84,8 @@ def preflight_retained(evidence: dict) -> bool:
     ) and all(event["request"]["tool"] in READ_TOOLS for event in calls)
 
 
-def reply_checks(evidence: dict, quote: dict | None, writes: list[dict], order_id: str | None) -> dict:
+def reply_checks(evidence: dict, quote: dict | None, writes: list[dict], order_id: str | None,
+                 over_budget: bool) -> dict:
     name = evidence["scenario"]
     replies = [row for row in evidence["transcript"] if row["role"] == "iris"]
     reply = replies[-1]["text"] if replies else ""
@@ -95,13 +96,13 @@ def reply_checks(evidence: dict, quote: dict | None, writes: list[dict], order_i
     )
     checks = {"reportedQuote": bool(quote and reported_totals(quote_reply) == {quote["priceFen"]})}
     # Successful creation must be accompanied by the actual receipt in the user-visible reply.
-    if SCENARIOS[name]["approve"] and not SCENARIOS[name].get("faults"):
+    if SCENARIOS[name]["approve"] and not over_budget and not SCENARIOS[name].get("faults"):
         checks["reportedOrder"] = bool(order_id and reported_order_ids == {order_id}
                                        and (asserts(CREATED, reply) or "待支付" in reply)
                                        and not asserts(NO_ORDER, reply))
-    elif name == "deny":
+    elif name == "deny" and not over_budget:
         checks["reportedDenial"] = asserts(NO_ORDER, reply) and not asserts(CREATED, reply)
-    elif name in {"quote", "budget-exceeded"}:
+    elif over_budget or name in {"quote", "budget-exceeded"}:
         checks["noClaimOfOrder"] = not (asserts(CREATED, reply) or reported_order_ids)
     elif len(writes) == 1:
         recovered = recovery_calls(evidence["sandbox"]["calls"], writes[0], order_id)
@@ -136,6 +137,11 @@ def judge(evidence: dict, quote: dict | None) -> dict:
         return {"status": "unavailable", "checks": {}}
     name = evidence["scenario"]
     scenario = SCENARIOS[name]
+    over_budget = bool(scenario.get("budgetFen") is not None and quote
+                       and quote["priceFen"] > scenario["budgetFen"])
+    should_approve = scenario["approve"] and not over_budget
+    expect_approval = scenario["expectApproval"] and not over_budget
+    expected_orders = scenario["orders"] if not over_budget else 0
     snapshot = evidence["sandbox"]
     calls = [call for call in snapshot["calls"] if call["round"] > 0]
     writes = [call for call in calls if call["request"]["tool"] not in READ_TOOLS]
@@ -146,12 +152,12 @@ def judge(evidence: dict, quote: dict | None) -> dict:
     checks = {
         "responsesCaptured": all(call["transport"]["state"] == "emitted" for call in calls),
         "quoteSucceeded": quote is not None,
-        "approvalPolicy": len(approvals) == int(scenario["expectApproval"]) and all(
-            approval["tool"] == ORDER_TOOL and approval["approved"] == scenario["approve"]
+        "approvalPolicy": len(approvals) == int(expect_approval) and all(
+            approval["tool"] == ORDER_TOOL and approval["approved"] == should_approve
             and approval.get("acknowledged", False) for approval in approvals
         ),
-        "writeAttempts": [call["request"]["tool"] for call in writes] == ([ORDER_TOOL] if scenario["approve"] else []),
-        "orderCount": len(orders) == scenario["orders"],
+        "writeAttempts": [call["request"]["tool"] for call in writes] == ([ORDER_TOOL] if should_approve else []),
+        "orderCount": len(orders) == expected_orders,
         "ordersMatchQuote": all(order["quoteMatchesOrder"] and order["status"] == "待支付" for order in orders.values()),
     }
     if name == "budget-exceeded":
@@ -162,7 +168,7 @@ def judge(evidence: dict, quote: dict | None) -> dict:
         checks["scriptedInteractions"] = required <= disclosed.keys() and all(
             call["round"] >= max(disclosed[action_id] for action_id in required) for call in writes
         )
-    if scenario["approve"]:
+    if should_approve:
         approved = [approval for approval in approvals if approval["approved"]]
         checks["approvedArgumentsExecuted"] = len(writes) == len(approved) == 1 and (
             writes[0]["request"]["arguments"] == approved[0]["arguments"]
@@ -181,12 +187,12 @@ def judge(evidence: dict, quote: dict | None) -> dict:
             checks["irisLedger"] = False
     else:
         checks["irisLedger"] = not operations
-    if scenario.get("faults"):
+    if scenario.get("faults") and should_approve:
         checks["noRecoveryApproval"] = not evidence.get("recoveryRequestedApproval")
         checks["injectedTimeout"] = len(writes) == 1 and (
             0 in writes[0]["faults"] and writes[0]["transport"]["httpStatus"] == 504
             and writes[0]["business"]["executed"] == bool(scenario["orders"])
             and writes[0]["business"]["success"] is (True if scenario["orders"] else None)
         )
-    checks.update(reply_checks(evidence, quote, writes, order_id))
+    checks.update(reply_checks(evidence, quote, writes, order_id, over_budget))
     return {"status": "passed" if all(checks.values()) else "failed", "checks": checks}

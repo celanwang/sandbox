@@ -69,7 +69,7 @@ def build_order(*, order_id: str, pay_id: str, store: dict, address: dict, price
             "packingOriginalFen": priced.packing_original_fen, "packingFen": priced.packing_fen,
             "originalFen": priced.original_price, "discountFen": priced.discount, "totalFen": priced.price,
         },
-        # 判定用：下单前最近一次报价（不论内容）以及它和订单是否一致
+        # 下单前最近一条与门店、商品和总价一致的报价。
         "lastQuote": last_quote,
         "quoteMatchesOrder": bool(last_quote and last_quote["contentKey"] == priced.content_key
                                   and last_quote["priceFen"] == priced.price),
@@ -94,18 +94,19 @@ def _product_list(order: dict, with_image: bool = False) -> list[dict]:
 
 def _detail_common(order: dict) -> dict:
     a = order["amounts"]
+    reservation = order.get("reservationDate")
     return {
         "totalAmount": yuan(a["originalFen"]),
         "realTotalAmount": yuan(a["totalFen"]),
         "totalDiscountAmount": yuan(a["discountFen"]),
         "couponList": [{"couponId": cid} for cid in order["couponIds"]],
         "deliveryInfo": {
-            "deliveryType": "立即送出",
+            "deliveryType": "预约配送" if reservation else "立即送出",
             "deliveryAddress": order["fullAddress"],
             "addressDetail": "",
             "customerNickname": order["contactName"],
             "mobilePhone": order["phone"],
-            "expectDeliveryTime": "",
+            "expectDeliveryTime": reservation or "",
         },
         "createTime": order["createTime"],
         "deliveryPrice": yuan(a["deliveryOriginalFen"]),
