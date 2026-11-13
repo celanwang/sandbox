@@ -320,6 +320,13 @@ def test_active_monitor_completes_multiturn_order(client, sandbox_client, tmp_pa
     assert decision["action"] == {"kind": "scripted_reply", "actionIds": [expected["actionId"]],
                                   "messageId": "message-3", "acknowledged": True}
     save(tmp_path / name, evidence)
+    summary = json.loads((tmp_path / name / "summary.json").read_text())
+    assert summary["query"] == SCENARIOS[name]["prompt"]
+    assert summary["verdict"] == "passed"
+    assert summary["failedChecks"] == []
+    interaction, = summary["interactions"]
+    assert interaction["runnerReply"]["text"] == expected["reply"]
+    assert interaction["recognition"]["matches"][0]["evidence"] in interaction["irisReply"]["text"]
     row, = replay(tmp_path / name / "evidence.json", recognizer)
     assert row["sameIntents"] and row["recordedAction"] == decision["action"]
 

@@ -13,6 +13,7 @@ import httpx
 from monitor.qwen import QwenRecognizer, api_key, model_client
 from runner.clients import Iris, Sandbox
 from runner.episode import run_episode
+from runner.report import save_report, summarize
 from runner.scenarios import SCENARIOS
 from sandbox.storage import write_atomic
 
@@ -24,6 +25,7 @@ def save(directory: Path, evidence: dict) -> None:
         lines = (json.dumps(event, ensure_ascii=False) + "\n" for event in snapshot["calls"])
         write_atomic(directory / "events.jsonl", lines)
     write_atomic(directory / "evidence.json", (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",))
+    save_report(directory / "summary.json", summarize(evidence))
 
 
 def source_revision() -> dict | None:
