@@ -18,7 +18,7 @@ export MCD_MCP_TOKEN="$(openssl rand -hex 24)"
 python -m sandbox.server
 ```
 
-The service listens on `127.0.0.1:8100`. Use the same environment variables in the terminals that make requests. The admin bearer token manages episodes. The MCP bearer token selects an active episode. Start with `--archive-dir runs/sandbox-archive` to retain closed snapshots across restarts and release their in-memory state.
+The service listens on `127.0.0.1:8100`. The admin bearer token manages episodes. Generate a fresh MCP bearer token for each episode. Start with `--archive-dir runs/sandbox-archive` to retain closed snapshots and token claims across restarts. Use one server process per archive directory.
 
 To open an episode and list its tools without Iris, run the following in another terminal.
 
@@ -37,24 +37,24 @@ curl -fsS http://127.0.0.1:8100/mcp \
 
 ## Run workflows with Iris
 
-Start a dedicated Iris test instance with its own PostgreSQL, Redis, and model configuration. Apply these settings to the Iris process before startup.
+Start a dedicated Iris test instance with its own PostgreSQL, Redis, and model configuration. Generate an episode ID and token before launching Iris, and use the same values in the Iris and Runner terminals.
 
 ```sh
-export MCD_MCP_URL=http://127.0.0.1:8100/mcp
-export MCD_MCP_TOKEN='<same value used by the runner>'
+export SANDBOX_EPISODE_ID="$(openssl rand -hex 16)"
+export MCD_MCP_TOKEN="$(openssl rand -hex 24)"
+export MCD_MCP_URL="http://127.0.0.1:8100/mcp/$SANDBOX_EPISODE_ID/1"
 export IRIS_AUTO_REVIEW=false
 ```
 
 With Sandbox and Iris running, start the runner from the Sandbox repository. The runner opens each episode, asks Iris to query delivery addresses, and checks for that call in the new episode before sending the scenario prompt. It approves a matching create-order request at most once, after verifying the quote and budget.
 
 ```sh
-python -m runner --iris http://127.0.0.1:8080/api
-python -m runner quote order deny budget-exceeded timeout-before timeout-after --seed 0
+python -m runner order --episode-id "$SANDBOX_EPISODE_ID" --iris http://127.0.0.1:8080/api
 ```
 
-Each episode writes `evidence.json` and `events.jsonl` under `runs/<batch>/<scenario>/`. The runner returns a nonzero exit code if any scenario fails its checks or required evidence is unavailable. Each token has one active episode at a time. The runner closes its episode after collecting evidence. Manual sessions can use a separate token or close their episode before reusing the runner token.
+Each invocation runs one scenario. To run another scenario, create a fresh ID and token and restart Iris with those values. Iris caches the MCP client configuration for its process. The Runner retries an ambiguous episode-open response using the same ID. It writes `evidence.json` and `events.jsonl` under `runs/<batch>/<scenario>/` and exits nonzero for a failed or unavailable verdict.
 
-The timeout scenarios verify the injected response, the order state and Iris ledger, a read-only lookup after submission, and the user-visible conclusion. The runner sends a scripted read-only follow-up and marks it in the transcript. It checks explicit total and order references in the scripted responses. Provide `--iris-revision` to record the build revision alongside the observed model names, scenario settings, and trace limitations.
+The timeout scenarios verify the injected response, the order state and Iris ledger, a read-only lookup after the timeout, and the user-visible conclusion. Evidence groups lookups by whether they started before the timeout, after the timeout without a user prompt, or after the scripted follow-up. A prompted lookup can satisfy the scenario and is recorded separately from autonomous recovery. The verdict also checks explicit amount, payment, and delivery claims. Provide `--iris-revision` to record the build revision alongside the observed model names, scenario settings, and trace limitations.
 
 ### Run the intent monitor
 
@@ -62,14 +62,14 @@ The timeout scenarios verify the injected response, the order state and Iris led
 
 ```sh
 export MONITOR_DASHSCOPE_API_KEY='<your Bailian API key>'
-python -m runner clarify-address clarify-drink --monitor active
+python -m runner clarify-address --episode-id "$SANDBOX_EPISODE_ID" --monitor active
 ```
 
 `DASHSCOPE_API_KEY` can supply the key if `MONITOR_DASHSCOPE_API_KEY` is unset. Set `MONITOR_BASE_URL` to use a workspace-specific OpenAI-compatible base URL.
 
 - `active` uses verified matches for configured replies. An uncertain or unavailable classification ends automatic follow-up and preserves the reason in the evidence.
-- `shadow` records the proposed action while the runner follows the keyword baseline.
-- `off` is the default and runs the original scenarios when no names are supplied. The clarification scenarios require the expected dialogue before an order can pass.
+- `shadow` records the model proposal and uses the keyword baseline to select from the same scenario replies.
+- `off` is the default. It uses the keyword baseline for configured replies without invoking the model. The clarification scenarios require the expected dialogue before an order can pass.
 
 Each decision links its exact model input and recognition result to the Iris message and the actual user reply in `evidence.json`. Replay the recorded decision locally or ask Qwen to classify the captured input again.
 
@@ -86,15 +86,17 @@ All paths in this table use `SANDBOX_ADMIN_TOKEN` as a bearer token.
 | --- | --- |
 | `GET /admin/catalog` | List domains and scenes. |
 | `GET /admin/episodes` | List active, closed, and archived episodes by ID. |
-| `POST /admin/episodes` | Open an episode with `token`, optional `domain`, `scene`, `seed`, and `faults`. Defaults are `mcd`, `lunch`, and seed zero. |
-| `POST /admin/episodes/{id}/round` | Set the round using `{"round": 1}`. |
+| `POST /admin/episodes` | Open an episode with a fresh `token`, optional `episodeId`, `domain`, `scene`, `seed`, and `faults`. Repeating the same explicit ID and parameters returns the original ID within the running service. |
+| `POST /admin/episodes/{id}/round` | Set the round using `{"round": 1}`. Include `generation` to require the matching generation. |
 | `GET /admin/episodes/{id}/snapshot` | Read the fault plan, initial and current state, and call events. |
 | `GET /admin/episodes/{id}/events` | Export tool events as newline-delimited JSON. |
 | `POST /admin/episodes/{id}/reset` | Restore the initial state and fault plan, clear calls, and increment the generation. |
-| `POST /admin/episodes/{id}/close` | Seal the episode, return its final snapshot, and release the bearer token. |
+| `POST /admin/episodes/{id}/close` | Seal the episode, return its final snapshot, and retire the bearer token. |
 | `DELETE /admin/episodes/{id}` | Remove a closed episode or its on-disk archive. |
 
 Round changes, resets, and closes return HTTP 409 while an admitted MCP POST is in flight. If archive publication fails, the episode remains active so the administrator can retry closing it.
+
+The Runner pins the generation for round changes, snapshots, and closing. Manual clients can use `/mcp` in generation 1. After a reset, use `/mcp/<episodeId>/<generation>` with the new generation reported by the reset response. A retired token cannot open a new episode.
 
 To simulate an order that committed before timing out, pass this fault plan when opening an episode.
 

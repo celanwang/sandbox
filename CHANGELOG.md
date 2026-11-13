@@ -11,8 +11,16 @@
 - Use Qwen 3.8 Flash to recognize scripted dialogue intents in shadow or active mode.
 - Exercise address and drink clarification and replay recorded monitor decisions from evidence.
 
+### Changed
+
+- Run one scenario per Iris MCP credential and support episode-scoped MCP URLs.
+
 ### Fixed
 
 - Require visible quotes, matching Iris ledger entries, and read-only recovery evidence in scenario verdicts.
 - Prevent in-flight requests from crossing a round or reset and record observed disconnects separately from planned faults.
 - Preserve order chronology and reject invalid reservations and unsupported customizations.
+- Pin Runner evidence to the verified episode generation and retry ambiguous opens by ID.
+- Reject contradictory payment and delivery claims and classify recovery lookups by timing.
+- Share clarification policies across monitor modes and validate replayed replies against scenario actions.
+- Preserve matching quotes across comparisons and include reservation details in order receipts.
