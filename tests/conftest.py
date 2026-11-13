@@ -29,8 +29,8 @@ def admin(client, episode_id, action, method="GET", **kwargs):
     return client.request(method, f"/admin/episodes/{episode_id}/{action}", headers=ADMIN, **kwargs).raise_for_status()
 
 
-def rpc(client, method, params, *, token=MCP_TOKEN, rpc_id=7, **headers):
-    return client.post("http://localhost/mcp", headers={
+def rpc(client, method, params, *, token=MCP_TOKEN, rpc_id=7, endpoint="/mcp", **headers):
+    return client.post(f"http://localhost{endpoint}", headers={
         "Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream", **headers,
     }, json={"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": params})
 

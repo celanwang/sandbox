@@ -39,19 +39,18 @@ def source_revision() -> dict | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("scenarios", nargs="*", metavar="SCENARIO", help=", ".join(SCENARIOS))
+    parser.add_argument("scenario", nargs="?", choices=SCENARIOS, default="order")
     parser.add_argument("--iris", default="http://127.0.0.1:8080/api")
     parser.add_argument("--sandbox", default="http://127.0.0.1:8100")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iris-revision", help="Iris build revision to include in the evidence")
+    parser.add_argument("--episode-id", help="preassigned episode ID for an episode-scoped MCP URL")
     parser.add_argument("--monitor", choices=("off", "shadow", "active"), default="off",
                         help="record intent decisions or use them for configured scenario replies")
     parser.add_argument("--out", type=Path, default=Path("runs"))
     args = parser.parse_args()
-    names = args.scenarios or [name for name, scenario in SCENARIOS.items()
-                               if args.monitor != "off" or not scenario.get("interactions")]
-    if unknown := set(names) - SCENARIOS.keys():
-        parser.error(f"unknown scenarios: {', '.join(sorted(unknown))}")
+    if args.episode_id and (len(args.episode_id) != 32 or any(c not in "0123456789abcdef" for c in args.episode_id)):
+        parser.error("--episode-id requires 32 lowercase hexadecimal characters")
     admin_token = os.environ.get("SANDBOX_ADMIN_TOKEN")
     mcp_token = os.environ.get("MCD_MCP_TOKEN")
     if not admin_token or not mcp_token:
@@ -62,7 +61,6 @@ def main() -> int:
     batch = args.out / uuid4().hex
     batch.mkdir(parents=True)
     source = source_revision()
-    passed = True
     with (
         httpx.Client(base_url=args.iris.rstrip("/"), timeout=httpx.Timeout(10, read=300), trust_env=False) as iris_http,
         httpx.Client(base_url=args.sandbox.rstrip("/") + "/admin", timeout=10, trust_env=False,
@@ -71,18 +69,16 @@ def main() -> int:
     ):
         iris, sandbox = Iris(iris_http), Sandbox(sandbox_http, mcp_token)
         recognizer = QwenRecognizer(monitor_http) if monitor_http is not None else None
-        for index, name in enumerate(names, start=1):
-            evidence = run_episode(name, iris, sandbox, seed=args.seed, monitor_mode=args.monitor,
-                                   recognizer=recognizer)
-            evidence["provenance"].update(runnerSource=source, irisRevision=args.iris_revision)
-            directory = batch / f"{index:02d}-{name}"
-            save(directory, evidence)
-            verdict = evidence["verdict"]["status"]
-            print(f"{name} {verdict} {directory.resolve()}")
-            if evidence["status"] == "interrupted":
-                return 130
-            passed &= verdict == "passed"
-    return 0 if passed else 1
+        evidence = run_episode(args.scenario, iris, sandbox, seed=args.seed, monitor_mode=args.monitor,
+                               recognizer=recognizer, requested_episode_id=args.episode_id)
+    evidence["provenance"].update(runnerSource=source, irisRevision=args.iris_revision)
+    directory = batch / f"01-{args.scenario}"
+    save(directory, evidence)
+    verdict = evidence["verdict"]["status"]
+    print(f"{args.scenario} {verdict} {directory.resolve()}")
+    if evidence["status"] == "interrupted":
+        return 130
+    return 0 if verdict == "passed" else 1
 
 
 if __name__ == "__main__":

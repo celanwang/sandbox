@@ -1,5 +1,7 @@
 """HTTP clients for an independently running Iris and Sandbox."""
 
+from uuid import uuid4
+
 import httpx
 
 
@@ -50,17 +52,33 @@ class Sandbox:
         self.http = http
         self.token = token
 
-    def start(self, scenario: dict, seed: int) -> str:
-        return self.http.post("/episodes", json={
+    def start(self, scenario: dict, seed: int, episode_id: str | None = None) -> str:
+        episode_id = episode_id or uuid4().hex
+        payload = {
+            "episodeId": episode_id,
             "token": self.token, "domain": "mcd", "scene": "lunch", "seed": seed,
             "faults": scenario.get("faults", []),
-        }).raise_for_status().json()["episodeId"]
+        }
+        for attempt in range(2):
+            try:
+                result = self.http.post("/episodes", json=payload).raise_for_status().json()
+                if result["episodeId"] != episode_id:
+                    raise ValueError("Sandbox returned a different episode ID")
+                return episode_id
+            except httpx.TransportError:
+                if attempt:
+                    raise
 
-    def set_round(self, episode_id: str, round_number: int) -> None:
-        self.http.post(f"/episodes/{episode_id}/round", json={"round": round_number}).raise_for_status()
+    def set_round(self, episode_id: str, round_number: int, *, generation: int | None = None) -> None:
+        payload = {"round": round_number}
+        if generation is not None:
+            payload["generation"] = generation
+        self.http.post(f"/episodes/{episode_id}/round", json=payload).raise_for_status()
 
-    def snapshot(self, episode_id: str) -> dict:
-        return self.http.get(f"/episodes/{episode_id}/snapshot").raise_for_status().json()
+    def snapshot(self, episode_id: str, *, generation: int | None = None) -> dict:
+        params = {"generation": generation} if generation is not None else None
+        return self.http.get(f"/episodes/{episode_id}/snapshot", params=params).raise_for_status().json()
 
-    def close(self, episode_id: str) -> dict:
-        return self.http.post(f"/episodes/{episode_id}/close").raise_for_status().json()
+    def close(self, episode_id: str, *, generation: int | None = None) -> dict:
+        params = {"generation": generation} if generation is not None else None
+        return self.http.post(f"/episodes/{episode_id}/close", params=params).raise_for_status().json()

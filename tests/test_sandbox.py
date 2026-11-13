@@ -71,7 +71,8 @@ def test_timeout_evidence(client, fault, committed, mode):
     assert len(body(tool(client, "order-list"))["data"]["list"]) == int(committed)
     reset = admin(client, run_id, "reset", "POST").json()
     assert reset["generation"] == 2 and not reset["calls"] and not reset["state"]["orders"]
-    assert tool(client, "create-order", ORDER).status_code == result.status_code
+    assert tool(client, "create-order", ORDER).status_code == 401
+    assert tool(client, "create-order", ORDER, endpoint=f"/mcp/{run_id}/2").status_code == result.status_code
 
 
 @pytest.mark.parametrize(("fault", "target", "args", "expected"), [
@@ -96,7 +97,7 @@ def test_start_fault_reapplied_after_reset(client):
     reset = admin(client, run_id, "reset", "POST").json()
     assert reset["startFaults"] == [0]
     assert reset["initialState"]["soldOut"] == reset["state"]["soldOut"] == {"100101": True}
-    assert body(tool(client, "create-order", ORDER))["success"] is False
+    assert body(tool(client, "create-order", ORDER, endpoint=f"/mcp/{run_id}/2"))["success"] is False
 
 
 def test_management_auth_and_token_isolation(client):
@@ -111,7 +112,8 @@ def test_management_auth_and_token_isolation(client):
     assert not admin(client, second, "snapshot").json()["calls"]
     assert admin(client, first, "close", "POST").json()["closed"] is True
     assert tool(client, "order-list").status_code == 401
-    third = start(client)
+    assert client.post("/admin/episodes", headers=ADMIN, json={"token": MCP_TOKEN}).status_code == 409
+    third = start(client, token="third-mcd")
     assert first != third
     assert not admin(client, third, "snapshot").json()["state"]["orders"]
 
@@ -305,7 +307,7 @@ def test_closed_snapshot_survives_new_app_and_can_be_purged(tmp_path):
         body(tool(client, "create-order", ORDER))
         expected = admin(client, episode, "close", "POST").json()
         assert expected["closed"] and len(expected["state"]["orders"]) == 1
-        assert len(list(tmp_path.iterdir())) == 1
+        assert len(list(tmp_path.glob("*.json"))) == 1
     with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as client:
         assert admin(client, episode, "snapshot").json() == expected
         assert admin(client, episode, "close", "POST").json() == expected
@@ -337,3 +339,50 @@ def test_order_accepts_available_future_reservation(client):
     start(client)
     result = body(tool(client, "create-order", {**ORDER, "reservationDate": "2026-11-10 13:00"}))
     assert result["success"] is True
+
+
+def test_episode_open_is_idempotent_and_old_credentials_cannot_write(client):
+    from uuid import uuid4
+
+    episode_id = uuid4().hex
+    payload = {"episodeId": episode_id, "token": MCP_TOKEN}
+    assert client.post("/admin/episodes", headers=ADMIN, json=payload).status_code == 201
+    retry = client.post("/admin/episodes", headers=ADMIN, json=payload)
+    assert retry.status_code == 200 and retry.json()["episodeId"] == episode_id
+    assert client.post("/admin/episodes", headers=ADMIN, json={**payload, "seed": 2}).status_code == 409
+    admin(client, episode_id, "close", "POST")
+    assert client.post("/admin/episodes", headers=ADMIN, json=payload).status_code == 200
+    assert client.post("/admin/episodes", headers=ADMIN, json={"token": MCP_TOKEN}).status_code == 409
+
+    current = start(client, token="current")
+    old_url = f"/mcp/{episode_id}/1"
+    assert tool(client, "create-order", ORDER, token="current", endpoint=old_url).status_code == 401
+    assert tool(client, "create-order", ORDER).status_code == 401
+    wrong_meta = tool(client, "create-order", ORDER, token="current", meta={"runId": episode_id})
+    assert wrong_meta.raise_for_status().json()["result"]["isError"] is True
+    assert not admin(client, current, "snapshot").json()["state"]["orders"]
+
+
+def test_old_generation_cannot_issue_requests_after_reset(client):
+    episode = start(client)
+    assert tool(client, "order-list", endpoint=f"/mcp/{episode}/1").status_code == 200
+    admin(client, episode, "reset", "POST")
+    assert tool(client, "create-order", ORDER, endpoint=f"/mcp/{episode}/1").status_code == 401
+    assert client.post(f"/admin/episodes/{episode}/round", headers=ADMIN,
+                       json={"generation": 1, "round": 1}).status_code == 409
+    assert client.post(f"/admin/episodes/{episode}/close?generation=1", headers=ADMIN).status_code == 409
+    assert tool(client, "order-list", endpoint=f"/mcp/{episode}/2").status_code == 200
+    assert not admin(client, episode, "snapshot").json()["state"]["orders"]
+
+
+def test_retired_token_remains_retired_after_archived_episode_is_deleted(tmp_path):
+    from starlette.testclient import TestClient
+
+    from sandbox.server import create_app
+
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
+        episode = start(http)
+        admin(http, episode, "close", "POST")
+        assert http.delete(f"/admin/episodes/{episode}", headers=ADMIN).status_code == 204
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
+        assert http.post("/admin/episodes", headers=ADMIN, json={"token": MCP_TOKEN}).status_code == 409

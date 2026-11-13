@@ -3,7 +3,7 @@
 import re
 from decimal import Decimal
 
-from runner.scenarios import ORDER_TOOL, READ_TOOLS, SCENARIOS
+from runner.scenarios import CANARY_TOOL, ORDER_TOOL, READ_TOOLS, SCENARIOS
 
 TOTAL = re.compile(
     r"(?:总价|总金额|合计金额|总费用|总计|合计|应付金额)[\s:：|为是]*[¥￥]?\s*"
@@ -66,6 +66,24 @@ def recovery_calls(calls: list[dict], write: dict, order_id: str | None) -> list
     return recovered
 
 
+def preflight_retained(evidence: dict) -> bool:
+    probe = evidence["preflight"]
+    snapshot = evidence["sandbox"]
+    if not snapshot or not snapshot["closed"] or snapshot["runId"] != evidence["runId"]:
+        return False
+    generation = probe.get("generation")
+    if snapshot["generation"] != generation:
+        return False
+    if any(event["generation"] != generation or event["runId"] != snapshot["runId"] for event in snapshot["calls"]):
+        return False
+    calls = [event for event in snapshot["calls"] if event["round"] == 0]
+    return {event["requestId"] for event in calls} == set(probe["requestIds"]) and any(
+        event["request"]["tool"] == CANARY_TOOL and event["business"]["success"] is True
+        and event["transport"]["state"] == "emitted" and event["transport"]["httpStatus"] == 200
+        for event in calls
+    ) and all(event["request"]["tool"] in READ_TOOLS for event in calls)
+
+
 def reply_checks(evidence: dict, quote: dict | None, writes: list[dict], order_id: str | None) -> dict:
     name = evidence["scenario"]
     replies = [row for row in evidence["transcript"] if row["role"] == "iris"]
@@ -114,7 +132,7 @@ def reply_checks(evidence: dict, quote: dict | None, writes: list[dict], order_i
 
 def judge(evidence: dict, quote: dict | None) -> dict:
     if (evidence["status"] != "complete" or not evidence["preflight"].get("verified")
-            or not evidence["sandbox"] or "state" not in evidence["iris"]):
+            or not evidence["sandbox"] or "state" not in evidence["iris"] or not preflight_retained(evidence)):
         return {"status": "unavailable", "checks": {}}
     name = evidence["scenario"]
     scenario = SCENARIOS[name]

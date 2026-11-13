@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from secrets import compare_digest
@@ -34,6 +35,7 @@ class OpenEpisode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     token: str = Field(pattern=r"^[\x21-\x7e]+$", max_length=512)
+    episodeId: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     domain: str = "mcd"
     scene: str = "lunch"
     seed: int = 0
@@ -42,6 +44,7 @@ class OpenEpisode(BaseModel):
 
 class SetRound(BaseModel):
     round: int = Field(ge=0)
+    generation: int | None = Field(default=None, ge=1)
 
 
 def bearer(headers: Headers) -> str:
@@ -69,6 +72,11 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
         scope = context.request.scope
         episode = scope["sandbox.episode"]
         meta = context.meta.model_dump(by_alias=True, exclude_none=True) if context.meta is not None else None
+        if meta and (meta.get("runId", episode.episode_id) != episode.episode_id
+                     or meta.get("generation", episode.generation) != episode.generation):
+            return types.CallToolResult(content=[types.TextContent(
+                type="text", text="Request metadata does not match the active episode",
+            )], isError=True)
         event, fault = episode.invoke(name, arguments, context.request_id, meta)
         scope["sandbox.call"] = event
         if fault is not None:
@@ -94,13 +102,17 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
     async def mcp_endpoint(scope, receive, send):
         if scope["type"] != "http":
             return
-        if scope["path"].rstrip("/") not in ("", "/mcp"):
+        path = scope["path"].rstrip("/")
+        scoped = re.fullmatch(r"/mcp/([0-9a-f]{32})/([1-9][0-9]{0,9})", path)
+        if path not in ("", "/mcp") and not scoped:
             await JSONResponse({"error": "not found"}, status_code=404)(scope, receive, send)
             return
         token = bearer(Headers(scope=scope))
         admitted = scope["method"] == "POST"
-        episode = store.admit(token) if admitted else store.bound(token)
-        if episode is None:
+        episode_scope = (scoped[1], int(scoped[2])) if scoped else None
+        episode = store.admit(token, episode_scope) if admitted else store.bound(token)
+        if episode is None or (not admitted and (episode_scope or (episode.episode_id, 1))
+                               != (episode.episode_id, episode.generation)):
             await JSONResponse({"error": "no active episode for bearer token"}, status_code=401)(
                 scope, receive, send,
             )
@@ -188,20 +200,29 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
                 raise ValueError("unknown domain or scene")
             if compare_digest(config.token, admin_token):
                 raise ValueError("episode and admin tokens must differ")
-            episode = store.create(config.token, domain, config.scene, config.seed, config.faults)
+            episode_id, created = store.create(config.token, domain, config.scene, config.seed, config.faults,
+                                               config.episodeId)
         except ValidationError as error:
             return JSONResponse({"errors": error.errors(include_input=False, include_context=False)}, status_code=400)
         except ValueError as error:
             return JSONResponse({"error": str(error)}, status_code=400)
         except EpisodeConflict as error:
             return JSONResponse({"error": str(error)}, status_code=409)
-        return JSONResponse({"episodeId": episode.episode_id, "runId": episode.episode_id}, status_code=201)
+        except OSError:
+            log.exception("Could not persist the episode credential")
+            return JSONResponse({"error": "could not open episode"}, status_code=503)
+        return JSONResponse({"episodeId": episode_id, "runId": episode_id}, status_code=201 if created else 200)
 
     async def episode_action(request: Request) -> Response:
         if not admin_authenticated(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         episode_id = request.path_params["episode_id"]
         action = request.path_params.get("action")
+        generation = request.query_params.get("generation")
+        if generation is not None:
+            if not re.fullmatch(r"[1-9][0-9]{0,9}", generation):
+                return JSONResponse({"error": "invalid episode generation"}, status_code=400)
+            generation = int(generation)
         episode = store.get(episode_id)
         if episode is None:
             try:
@@ -214,6 +235,8 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             if archived is None:
                 return JSONResponse({"error": "episode not found"}, status_code=404)
             if (action, request.method) in {("snapshot", "GET"), ("close", "POST")}:
+                if generation is not None and generation != archived["generation"]:
+                    return JSONResponse({"error": "episode generation changed"}, status_code=409)
                 return JSONResponse(archived)
             if action == "events" and request.method == "GET":
                 return event_stream(archived["calls"])
@@ -228,14 +251,17 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             return Response(status_code=204)
         if request.method == "GET":
             if action == "snapshot":
-                return JSONResponse(episode.snapshot())
+                snapshot = episode.snapshot()
+                if generation is not None and generation != snapshot["generation"]:
+                    return JSONResponse({"error": "episode generation changed"}, status_code=409)
+                return JSONResponse(snapshot)
             if action == "events":
                 return event_stream(episode.events())
         if request.method == "POST":
             try:
                 if action == "close":
                     try:
-                        snapshot = await run_in_threadpool(store.close, episode)
+                        snapshot = await run_in_threadpool(store.close, episode, generation)
                     except OSError:
                         log.exception("Could not archive episode %s", episode_id)
                         return JSONResponse({"error": "could not archive episode"}, status_code=503)
@@ -248,6 +274,8 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
                     with episode.lock:
                         if episode.closed:
                             raise EpisodeConflict("episode is closed")
+                        if value.generation is not None and episode.generation != value.generation:
+                            raise EpisodeConflict("episode generation changed")
                         episode.ensure_idle()
                         episode.round = value.round
                     return JSONResponse({"round": value.round})

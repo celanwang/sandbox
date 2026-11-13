@@ -70,8 +70,9 @@ class EpisodeConflict(RuntimeError):
 
 
 class Episode:
-    def __init__(self, domain: Domain, scene: str, seed: int, faults: list[Fault]):
-        self.episode_id = uuid4().hex
+    def __init__(self, domain: Domain, scene: str, seed: int, faults: list[Fault],
+                 episode_id: str | None = None):
+        self.episode_id = episode_id or uuid4().hex
         self.domain = domain
         self.scene_id = scene
         self.seed = seed
@@ -233,18 +234,40 @@ class EpisodeStore:
     def __init__(self, archive_dir: Path | None = None):
         self.episodes: dict[str, Episode] = {}
         self.bindings: dict[str, Episode] = {}
+        self.opened: dict[str, tuple[str, str, str, int, tuple[Fault, ...]]] = {}
+        self.used_credentials: set[str] = set()
         self.lock = RLock()
         self.archive_dir = archive_dir
         if archive_dir is not None:
             archive_dir.mkdir(parents=True, exist_ok=True)
+            (archive_dir / ".credentials").mkdir(exist_ok=True)
 
-    def create(self, token: str, domain: Domain, scene: str, seed: int, faults: list[Fault]) -> Episode:
+    def create(self, token: str, domain: Domain, scene: str, seed: int, faults: list[Fault],
+               episode_id: str | None = None) -> tuple[str, bool]:
+        credential = hashlib.sha256(token.encode()).hexdigest()
+        config = credential, domain.name, scene, seed, tuple(faults)
         with self.lock:
-            if token in self.bindings:
-                raise EpisodeConflict("token already has an active episode")
-            episode = Episode(domain, scene, seed, faults)
+            if episode_id is not None and episode_id in self.opened:
+                if self.opened[episode_id] != config:
+                    raise EpisodeConflict("episode ID was already opened with different parameters")
+                return episode_id, False
+            claim = self.archive_dir / ".credentials" / credential if self.archive_dir is not None else None
+            if credential in self.used_credentials or (claim is not None and claim.exists()):
+                raise EpisodeConflict("MCP token already used by an episode")
+            archive = self.archive_path(episode_id) if episode_id else None
+            if archive is not None and archive.exists():
+                raise EpisodeConflict("episode ID already has an archive")
+            episode = Episode(domain, scene, seed, faults, episode_id)
+            if claim is not None:
+                try:
+                    with claim.open("x", encoding="utf-8") as file:
+                        file.write(episode.episode_id + "\n")
+                except FileExistsError as error:
+                    raise EpisodeConflict("MCP token already used by an episode") from error
             self.episodes[episode.episode_id] = self.bindings[token] = episode
-            return episode
+            self.used_credentials.add(credential)
+            self.opened[episode.episode_id] = config
+            return episode.episode_id, True
 
     def get(self, episode_id: str) -> Episode | None:
         with self.lock:
@@ -254,12 +277,12 @@ class EpisodeStore:
         with self.lock:
             return self.bindings.get(token)
 
-    def admit(self, token: str) -> Episode | None:
+    def admit(self, token: str, scope: tuple[str, int] | None = None) -> Episode | None:
         with self.lock:
             episode = self.bindings.get(token)
             if episode is not None:
                 with episode.lock:
-                    if episode.closing:
+                    if episode.closing or (scope or (episode.episode_id, 1)) != (episode.episode_id, episode.generation):
                         return None
                     episode.in_flight += 1
             return episode
@@ -304,8 +327,10 @@ class EpisodeStore:
                 raise EpisodeConflict("close the episode before deleting it")
             self.episodes.pop(episode.episode_id, None)
 
-    def close(self, episode: Episode) -> dict:
+    def close(self, episode: Episode, generation: int | None = None) -> dict:
         with self.lock, episode.lock:
+            if generation is not None and episode.generation != generation:
+                raise EpisodeConflict("episode generation changed")
             episode.ensure_idle()
             snapshot = episode.snapshot()
             if episode.closed:

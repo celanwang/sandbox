@@ -164,7 +164,7 @@ def test_timeout_without_lookup_fails(client, sandbox_client):
     assert evidence["verdict"]["checks"]["readOnlyRecovery"] is False
 
 
-def test_interrupt_releases_token(sandbox_client):
+def test_interrupt_closes_episode_and_retires_token(sandbox_client):
     class InterruptedIris:
         def chat(self, identity, prompt):
             raise KeyboardInterrupt
@@ -172,7 +172,7 @@ def test_interrupt_releases_token(sandbox_client):
     evidence = run_episode("order", InterruptedIris(), sandbox_client)
     assert evidence["status"] == "interrupted"
     assert evidence["sandbox"]["closed"] is True
-    fresh_id = sandbox_client.start(SCENARIOS["order"], 0)
+    fresh_id = Sandbox(sandbox_client.http, "next-run").start(SCENARIOS["order"], 0)
     assert fresh_id != evidence["runId"]
 
 
@@ -234,7 +234,7 @@ def test_offering_future_cancellation_does_not_contradict_a_verified_order(clien
     assert evidence["verdict"]["status"] == "passed"
 
 
-def test_interrupt_during_final_trace_releases_token(client, sandbox_client):
+def test_interrupt_during_final_trace_closes_episode(client, sandbox_client):
     class InterruptedTrace(FakeIris):
         def handle(self, request):
             if request.url.path == "/api/trace":
@@ -246,7 +246,7 @@ def test_interrupt_during_final_trace_releases_token(client, sandbox_client):
         evidence = run_episode("order", Iris(iris_http), sandbox_client)
     assert evidence["status"] == "interrupted"
     assert evidence["sandbox"]["closed"] and len(evidence["sandbox"]["state"]["orders"]) == 1
-    assert sandbox_client.start(SCENARIOS["order"], 0) != evidence["runId"]
+    assert Sandbox(sandbox_client.http, "next-run").start(SCENARIOS["order"], 0) != evidence["runId"]
 
 
 class ClarifyingIris(FakeIris):
@@ -372,3 +372,46 @@ def test_multiple_intents_use_scenario_reply_order(client, sandbox_client, monke
                                recognizer=MultipleIntents())
     assert evidence["verdict"]["status"] == "passed"
     assert fake.scenario_prompts[1] == "送到已有的公司地址。 饮料换成中杯鲜萃咖啡，其余按默认搭配。"
+
+
+@pytest.mark.parametrize("lost_responses", [1, 2])
+def test_lost_open_response_keeps_episode_recoverable(client, sandbox_client, lost_responses):
+    count = 0
+
+    def sandbox_request(request):
+        nonlocal count
+        response = client.send(request)
+        if request.method == "POST" and request.url.path == "/admin/episodes":
+            count += 1
+            if count <= lost_responses:
+                raise httpx.ReadTimeout("lost response", request=request)
+        return response
+
+    fake = FakeIris(client, "order")
+    with (
+        httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http,
+        httpx.Client(base_url="http://localhost/admin", headers=ADMIN,
+                     transport=httpx.MockTransport(sandbox_request)) as admin_http,
+    ):
+        evidence = run_episode("order", Iris(iris_http), Sandbox(admin_http, MCP_TOKEN))
+    assert count == 2
+    assert evidence["sandbox"]["closed"] is True
+    assert evidence["runId"] == evidence["sandbox"]["runId"]
+    assert evidence["verdict"]["status"] == ("passed" if lost_responses == 1 else "unavailable")
+
+
+def test_reset_invalidates_probe_and_prevents_approval(client, sandbox_client):
+    class ResetAfterProbe(FakeIris):
+        def handle(self, request):
+            response = super().handle(request)
+            if request.url.path == "/api/agent/state" and "-preflight-" in request.url.params["userId"]:
+                episode_id = client.get("/episodes").raise_for_status().json()["episodes"][0]["episodeId"]
+                client.post(f"/episodes/{episode_id}/reset").raise_for_status()
+            return response
+
+    fake = ResetAfterProbe(client, "order")
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("order", Iris(iris_http), sandbox_client)
+    assert evidence["preflight"]["verified"] is True
+    assert evidence["sandbox"]["generation"] == 2 and evidence["sandbox"]["closed"] is False
+    assert evidence["verdict"]["status"] == "unavailable" and not fake.confirmations

@@ -14,7 +14,7 @@ from runner.scenarios import (
     CANARY_PROMPT, CANARY_TOOL, DEFAULT_QUOTE_ITEMS, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS,
 )
 from runner.user import is_question
-from runner.verdict import judge, reported_totals
+from runner.verdict import judge, preflight_retained, reported_totals
 from sandbox.domains.mcd.world.pricing import PriceError, price_items
 from sandbox.episodes import SCHEMA_VERSION, utc_now
 
@@ -31,7 +31,7 @@ def error_message(error: Exception) -> str:
 
 def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                 monitor_mode: Literal["off", "shadow", "active"] = "off",
-                recognizer: Recognizer | None = None) -> dict:
+                recognizer: Recognizer | None = None, requested_episode_id: str | None = None) -> dict:
     if monitor_mode != "off" and recognizer is None:
         raise ValueError("monitor mode requires an intent recognizer")
     scenario = SCENARIOS[name]
@@ -40,10 +40,12 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
     required_actions = {action["actionId"] for action in actions}
     delivered_actions: dict[str, int] = {}
     min_quote_round = 1
-    episode_id = None
+    episode_id = requested_episode_id or uuid4().hex
+    owns_episode = False
+    generation = 1
     scenario_user = None
     evidence = {
-        "schemaVersion": SCHEMA_VERSION, "runId": None, "scenario": name, "seed": seed, "startedAt": utc_now(),
+        "schemaVersion": SCHEMA_VERSION, "runId": episode_id, "scenario": name, "seed": seed, "startedAt": utc_now(),
         "status": "complete", "errors": {}, "preflight": {}, "transcript": [], "approvals": [],
         "iris": {}, "sandbox": None,
         "monitor": {"mode": monitor_mode, "decisions": [], "deliveredActionIds": []},
@@ -71,13 +73,22 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
         return reply
 
     try:
-        episode_id = sandbox.start(scenario, seed)
-        evidence["runId"] = episode_id
+        try:
+            sandbox.start(scenario, seed, episode_id)
+            owns_episode = True
+        except (httpx.TransportError, KeyboardInterrupt):
+            # The server may have processed the request before the response was lost.
+            owns_episode = True
+            raise
+        opened = sandbox.snapshot(episode_id, generation=generation)
+        if opened["closed"] or opened["round"] != 0 or opened["calls"]:
+            owns_episode = False
+            raise RuntimeError("runner requires a fresh episode")
         canary = identity(episode_id, "preflight")
         evidence["preflight"]["identity"] = canary
         evidence["preflight"]["prompt"] = CANARY_PROMPT
         evidence["preflight"]["reply"] = iris.chat(canary, CANARY_PROMPT)
-        probe = sandbox.snapshot(episode_id)
+        probe = sandbox.snapshot(episode_id, generation=generation)
         calls = probe["calls"]
         verified = (
             any(call["request"]["tool"] == CANARY_TOOL and call["business"]["success"] is True
@@ -85,7 +96,8 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
             and all(call["request"]["tool"] in READ_TOOLS for call in calls)
             and not pending_approvals(iris.state(canary))
         )
-        evidence["preflight"].update(verified=verified, requestIds=[call["requestId"] for call in calls])
+        evidence["preflight"].update(verified=verified, generation=generation,
+                                     requestIds=[call["requestId"] for call in calls])
         if not verified:
             raise RuntimeError("Iris did not complete the read-only probe in this episode")
 
@@ -95,7 +107,7 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
         follow_up = None
         max_rounds = 3
         for round_number in range(1, max_rounds + 1):
-            sandbox.set_round(episode_id, round_number)
+            sandbox.set_round(episode_id, round_number, generation=generation)
             reply = chat(scenario_user, prompt, round_number, follow_up=follow_up)
             follow_up = None
             if scenario.get("quoteAfterInteraction"):
@@ -110,7 +122,7 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                         and approval["tool"] == ORDER_TOOL
                         and not any(previous["approved"] for previous in evidence["approvals"])
                         and required_actions <= delivered_actions.keys()
-                        and matching_quote(sandbox.snapshot(episode_id), approval, reported_totals(reply),
+                        and matching_quote(sandbox.snapshot(episode_id, generation=generation), approval, reported_totals(reply),
                                            quote_items, min_round=min_quote_round)
                     )
                     decision = {**approval, "round": round_number, "approved": approve, "at": utc_now()}
@@ -156,7 +168,7 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                 break
             prompt = LEGACY_REPLY
         if scenario.get("faults") and any(decision["approved"] for decision in evidence["approvals"]):
-            sandbox.set_round(episode_id, round_number + 1)
+            sandbox.set_round(episode_id, round_number + 1, generation=generation)
             chat(scenario_user, RECOVERY_PROMPT, round_number + 1, recovery=True)
             if pending_approvals(iris.state(scenario_user)):
                 evidence["recoveryRequestedApproval"] = True
@@ -180,9 +192,9 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
         evidence["status"] = "interrupted"
         evidence["errors"]["execution"] = "runner interrupted during Iris evidence collection"
     finally:
-        if episode_id is not None:
+        if owns_episode:
             try:
-                evidence["sandbox"] = close_when_idle(sandbox, episode_id)
+                evidence["sandbox"] = close_when_idle(sandbox, episode_id, generation)
             except Exception as error:
                 evidence["errors"]["sandbox.close"] = error_message(error)
                 try:
@@ -193,6 +205,10 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
     if evidence["errors"] and evidence["status"] == "complete":
         evidence["status"] = "capture_error"
     snapshot = evidence["sandbox"]
+    if evidence["preflight"].get("verified") and not preflight_retained(evidence):
+        if evidence["status"] == "complete":
+            evidence["status"] = "capture_error"
+        evidence["errors"]["sandbox.preflight"] = "verified probe is missing from the closed episode generation"
     trace = evidence["iris"].get("trace", [])
     evidence["provenance"] = {
         "scenario": scenario,
@@ -212,13 +228,14 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
     return evidence
 
 
-def close_when_idle(sandbox: Sandbox, episode_id: str) -> dict:
+def close_when_idle(sandbox: Sandbox, episode_id: str, generation: int) -> dict:
     deadline = time.monotonic() + 5
     while True:
         try:
-            return sandbox.close(episode_id)
+            return sandbox.close(episode_id, generation=generation)
         except httpx.HTTPStatusError as error:
-            if error.response.status_code != 409 or time.monotonic() >= deadline:
+            if (error.response.status_code != 409 or "generation changed" in error.response.text
+                    or time.monotonic() >= deadline):
                 raise
             time.sleep(0.1)
 
