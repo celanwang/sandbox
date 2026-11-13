@@ -505,6 +505,25 @@ def test_recovery_evidence_distinguishes_concurrent_autonomous_and_prompted_call
     }
 
 
+@pytest.mark.parametrize("change", ["unknown_action", "earlier_message", "different_reply"])
+def test_monitor_replay_rejects_changed_action(client, sandbox_client, tmp_path, change):
+    fake = ClarifyingIris(client, "clarify-address")
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("clarify-address", Iris(iris_http), sandbox_client, monitor_mode="active",
+                               recognizer=FixtureRecognizer())
+    action = evidence["monitor"]["decisions"][0]["action"]
+    if change == "unknown_action":
+        action["actionIds"] = ["unknown"]
+    elif change == "earlier_message":
+        action["messageId"] = evidence["transcript"][0]["messageId"]
+    else:
+        evidence["transcript"][2]["text"] = "送到家里。"
+    path = tmp_path / "evidence.json"
+    path.write_text(json.dumps(evidence))
+    with pytest.raises(ValueError, match="recorded action"):
+        replay(path, None)
+
+
 def test_pending_order_reply_can_include_product_subtotal_and_future_payment(client, sandbox_client):
     class DetailedReceipt(FakeIris):
         def handle(self, request):
