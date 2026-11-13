@@ -14,7 +14,7 @@ from runner.scenarios import (
     CANARY_PROMPT, CANARY_TOOL, DEFAULT_QUOTE_ITEMS, ORDER_BUDGET_FEN, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS,
 )
 from runner.user import is_question
-from runner.verdict import judge, preflight_retained, reported_totals
+from runner.verdict import judge, preflight_retained, recovery_evidence, reported_totals
 from sandbox.domains.mcd.world.pricing import PriceError, price_items
 from sandbox.episodes import SCHEMA_VERSION, utc_now
 
@@ -226,6 +226,8 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                            if row["approved"]), None)
     quote = (last_quote(snapshot, quote_items, min_round=min_quote_round, store_code=approved_store)
              if snapshot and evidence["status"] == "complete" else None)
+    if scenario.get("faults") and snapshot:
+        evidence["recovery"] = recovery_evidence(evidence)
     evidence["verdict"] = judge(evidence, quote)
     evidence["finishedAt"] = utc_now()
     return evidence

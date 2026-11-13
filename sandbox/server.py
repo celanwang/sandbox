@@ -10,6 +10,7 @@ import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from secrets import compare_digest
+from time import monotonic_ns
 
 import anyio
 import mcp.types as types
@@ -77,7 +78,8 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             return types.CallToolResult(content=[types.TextContent(
                 type="text", text="Request metadata does not match the active episode",
             )], isError=True)
-        event, fault = episode.invoke(name, arguments, context.request_id, meta)
+        event, fault = episode.invoke(name, arguments, context.request_id, meta,
+                                      admitted_at=scope["sandbox.admitted_at"])
         scope["sandbox.call"] = event
         if fault is not None:
             scope["sandbox.fault"] = fault
@@ -108,6 +110,7 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             await JSONResponse({"error": "not found"}, status_code=404)(scope, receive, send)
             return
         token = bearer(Headers(scope=scope))
+        scope["sandbox.admitted_at"] = monotonic_ns()
         admitted = scope["method"] == "POST"
         episode_scope = (scoped[1], int(scoped[2])) if scoped else None
         episode = store.admit(token, episode_scope) if admitted else store.bound(token)

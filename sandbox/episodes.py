@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
+from time import monotonic_ns
 from typing import Literal, Protocol
 from uuid import uuid4
 
@@ -135,7 +136,8 @@ class Episode:
                 due.append(index)
         return due
 
-    def invoke(self, tool: str, arguments: dict, rpc_id: int | str, meta: dict | None) -> tuple[dict, Fault | None]:
+    def invoke(self, tool: str, arguments: dict, rpc_id: int | str, meta: dict | None,
+               *, admitted_at: int | None = None) -> tuple[dict, Fault | None]:
         with self.lock:
             if self.closed:
                 raise EpisodeConflict("episode is closed")
@@ -154,6 +156,7 @@ class Episode:
                 "generation": self.generation,
                 "requestId": uuid4().hex,
                 "requestedAt": utc_now(),
+                "admittedMonotonicNs": admitted_at if admitted_at is not None else monotonic_ns(),
                 "seq": self.seq + 1,
                 "round": self.round,
                 "nth": nth,
@@ -203,7 +206,8 @@ class Episode:
 
     def finish(self, event: dict, status: int | None, body: str | None, state: str) -> None:
         with self.lock:
-            event["transport"].update(state=state, httpStatus=status, body=body, completedAt=utc_now())
+            event["transport"].update(state=state, httpStatus=status, body=body, completedAt=utc_now(),
+                                      completedMonotonicNs=monotonic_ns())
 
     def snapshot(self) -> dict:
         with self.lock:

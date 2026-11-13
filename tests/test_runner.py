@@ -450,3 +450,97 @@ def test_seed_three_drink_is_correctly_rejected_by_budget(client, sandbox_client
                                monitor_mode="active", recognizer=FixtureRecognizer())
     assert evidence["verdict"]["status"] == "passed", evidence["verdict"]
     assert not fake.confirmations and not evidence["sandbox"]["state"]["orders"]
+
+
+@pytest.mark.parametrize(("name", "claim", "check"), [
+    ("quote", "已经为您完成付款，配送正在进行。", "noPaymentOrDeliveryClaim"),
+    ("order", "已经为您完成付款，实付 1 元。", "noPaymentOrDeliveryClaim"),
+    ("order", "订单总额：1 元。", "finalAmountConsistent"),
+    ("order", "实付金额：0.01 元。", "finalAmountConsistent"),
+])
+def test_contradictory_fulfillment_claim_fails(client, sandbox_client, name, claim, check):
+    class WrongClaim(FakeIris):
+        def handle(self, request):
+            result = super().handle(request)
+            if request.url.path == "/api/agent/confirm":
+                return httpx.Response(200, json={"reply": result.json()["reply"] + claim})
+            if name == "quote" and request.url.path == "/api/chat" and "-scenario-" in json.loads(request.content)["userId"]:
+                return httpx.Response(200, text=result.text + claim)
+            return result
+
+    fake = WrongClaim(client, name)
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode(name, Iris(iris_http), sandbox_client)
+    assert evidence["verdict"]["status"] == "failed"
+    assert evidence["verdict"]["checks"][check] is False
+
+
+def test_recovery_evidence_distinguishes_concurrent_autonomous_and_prompted_calls():
+    from runner.verdict import recovery_evidence
+
+    def event(request_id, seq, round_number, tool_name, status, start, finish, result):
+        return {
+            "requestId": request_id, "seq": seq, "round": round_number, "requestedAt": start,
+            "request": {"tool": tool_name},
+            "business": {"success": True, "result": result},
+            "transport": {"state": "emitted", "httpStatus": status, "completedAt": finish},
+        }
+
+    order = {"data": {"list": [{"orderId": "new"}]}}
+    evidence = {
+        "transcript": [{"role": "user", "round": 2, "recovery": True}],
+        "sandbox": {
+            "state": {"orders": {"new": {}}},
+            "calls": [
+                event("write", 1, 1, "create-order", 504, "01", "04", {}),
+                event("parallel", 2, 1, "order-list", 200, "02", "05", order),
+                event("autonomous", 3, 1, "order-list", 200, "05", "06", order),
+                event("prompted", 4, 2, "order-list", 200, "07", "08", order),
+            ],
+        },
+    }
+    assert recovery_evidence(evidence) == {
+        "beforeTimeout": ["parallel"], "autonomous": ["autonomous"], "prompted": ["prompted"],
+    }
+
+
+def test_pending_order_reply_can_include_product_subtotal_and_future_payment(client, sandbox_client):
+    class DetailedReceipt(FakeIris):
+        def handle(self, request):
+            response = super().handle(request)
+            if request.url.path == "/api/agent/confirm":
+                return httpx.Response(200, json={"reply": (
+                    response.json()["reply"] + "商品总价：46 元。总价：53.90 元。付款成功后会安排配送。"
+                )})
+            return response
+
+    fake = DetailedReceipt(client, "order")
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("order", Iris(iris_http), sandbox_client)
+    assert evidence["verdict"]["status"] == "passed", evidence["verdict"]
+
+
+def test_live_concurrent_lookup_does_not_count_as_post_timeout(client):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from conftest import admin, start
+    from runner.verdict import recovery_evidence
+
+    episode_id = start(client, faults=[
+        {"type": "TIMEOUT_COMMITTED", "tool": "create-order", "delaySeconds": 0.3},
+    ])
+    admin(client, episode_id, "round", "POST", json={"round": 1})
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        write = executor.submit(tool, client, "create-order", ORDER)
+        deadline = time.monotonic() + 2
+        while not admin(client, episode_id, "snapshot").json()["calls"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.002)
+        assert tool(client, "order-list", rpc_id=8).status_code == 200
+        assert write.result(timeout=2).status_code == 504
+    snapshot = admin(client, episode_id, "snapshot").json()
+    lookup_id = snapshot["calls"][1]["requestId"]
+    assert recovery_evidence({"sandbox": snapshot, "transcript": []}) == {
+        "beforeTimeout": [lookup_id], "autonomous": [], "prompted": [],
+    }
