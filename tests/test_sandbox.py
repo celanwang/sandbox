@@ -51,6 +51,31 @@ def test_engineering_order_requires_matching_quote_and_supports_cancel_then_reor
     assert orders[second]["amounts"]["totalFen"] == 6400
 
 
+@pytest.mark.parametrize("requote", [False, True])
+def test_engineering_same_basket_reorder_records_the_quote_it_used(client, requote):
+    episode = start(client, scene="engineering")
+    params = {"addressId": "addr_001", "storeCode": "mock_store_001", "orderType": 2, "beType": 2,
+              "items": [{"productCode": "meal_001", "quantity": 1}]}
+    admin(client, episode, "round", "POST", json={"round": 1})
+    assert body(tool(client, "calculate-price", params))["data"]["price"] == 3500
+    first = body(tool(client, "create-order", params))["data"]["orderId"]
+    assert body(tool(client, "cancel-order", {"orderId": first, "cancelReasonCode": 1}))["data"]["cancelResult"]
+    admin(client, episode, "round", "POST", json={"round": 2})
+    if requote:
+        assert body(tool(client, "calculate-price", params))["data"]["price"] == 3500
+    second = body(tool(client, "create-order", params))["data"]["orderId"]
+
+    snapshot = admin(client, episode, "close", "POST").json()
+    orders = snapshot["state"]["orders"]
+    quotes = snapshot["state"]["quotes"]
+    assert set(orders) == {first, second}
+    assert orders[first]["status"] == "已取消" and orders[second]["status"] == "待支付"
+    assert orders[first]["lastQuote"] == quotes["1"]
+    assert orders[second]["lastQuote"] == quotes["4" if requote else "1"]
+    assert orders[second]["lastQuote"]["round"] == (2 if requote else 1)
+    assert orders[second]["quoteMatchesOrder"] is True
+
+
 def test_tool_contract_and_export(client):
     run_id = start(client)
     init = rpc(client, "initialize", {
@@ -139,6 +164,23 @@ def test_start_fault_reapplied_after_reset(client):
     assert reset["startFaults"] == [0]
     assert reset["initialState"]["soldOut"] == reset["state"]["soldOut"] == {"100101": True}
     assert body(tool(client, "create-order", ORDER, endpoint=f"/mcp/{run_id}/2"))["success"] is False
+
+
+@pytest.mark.parametrize("persist", [False, True])
+def test_business_fault_state_lasts_until_reset_even_without_reinjection(client, persist):
+    episode = start(client, faults=[{"type": "SOLD_OUT", "tool": "create-order", "target": "100101",
+                                    "nth": 1, "persist": persist}])
+    for _ in range(2):
+        assert body(tool(client, "create-order", ORDER))["success"] is False
+    snapshot = admin(client, episode, "snapshot").json()
+    assert [call["faults"] for call in snapshot["calls"]] == [[0], [0] if persist else []]
+    assert [call["business"]["executed"] for call in snapshot["calls"]] == [True, True]
+    assert snapshot["calls"][1]["changes"] == []
+    assert snapshot["state"]["soldOut"] == {"100101": True}
+    assert snapshot["state"]["orders"] == {}
+    reset = admin(client, episode, "reset", "POST", params={"generation": 1}).json()
+    assert reset["generation"] == 2 and reset["calls"] == [] and reset["state"]["soldOut"] == {}
+    assert reset["faultPlan"] == snapshot["faultPlan"]
 
 
 def test_management_auth_and_token_isolation(client):

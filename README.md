@@ -2,7 +2,7 @@
 
 A stateful simulation environment for testing workflows and capturing execution traces.
 
-Sandbox runs simulated services independently of the application under test. The first adapter is a synthetic McDelivery service with 13 MCP tools for delivery addresses, stores, menus, coupons, quotes, and orders. The episode API owns isolation, virtual time, fault injection, and trace export. The optional runner drives Iris through its existing chat and approval APIs.
+Sandbox runs simulated services independently of the application under test. The synthetic McDelivery service exposes 13 MCP tools in `lunch` and 16 in `engineering`. The episode API manages isolation, a fixed scene clock, fault injection, and trace export. The optional runner drives Iris through its existing chat and approval APIs.
 
 ## Run the sandbox
 
@@ -43,6 +43,8 @@ curl -fsS http://127.0.0.1:8100/mcp \
 ## Run workflows with Iris
 
 The Iris engineering evaluator can use the McDelivery `engineering` fixture for its existing dining cases. It keeps the original test data and adds address updates and coupon claiming to the tools exposed in that fixture. Run it from the Iris checkout with `python3.11 mock/run_eval.py --sandbox-repo /path/to/sandbox`. The evaluator opens one isolated episode per case and saves its final snapshot with the step results.
+
+Each order in `engineering` requires a previous quote in the same generation with a matching store, basket, and total. The order snapshot records the quote's call sequence and round in `lastQuote`. The same basket can match an earlier quote after cancellation. The Iris evaluator checks that an order uses a quote from the step that requested approval when that flow requires a fresh quote.
 
 Start a dedicated Iris test instance with its own PostgreSQL, Redis, and model configuration. Generate an episode ID and token before launching Iris, and use the same values in the Iris and Runner terminals.
 
@@ -104,7 +106,7 @@ All paths in this table use `SANDBOX_ADMIN_TOKEN` as a bearer token.
 | --- | --- |
 | `GET /admin/catalog` | List domains and scenes. |
 | `GET /admin/episodes` | List active, closed, and archived episodes by ID. |
-| `POST /admin/episodes` | Open an episode with a fresh `token`, optional `episodeId`, `domain`, `scene`, `seed`, and `faults`. Repeating the same explicit ID and parameters returns the original ID within the running service. |
+| `POST /admin/episodes` | Open an episode with a fresh `token`, optional `episodeId`, `domain`, `scene`, `seed`, and `faults`. Repeating the same explicit ID and parameters returns the original ID while the episode or its archive is readable. |
 | `POST /admin/episodes/{id}/round` | Set the round using `{"round": 1}`. Include `generation` to require the matching generation. |
 | `GET /admin/episodes/{id}/snapshot` | Read the fault plan, initial and current state, and call events. |
 | `GET /admin/episodes/{id}/events` | Export tool events as newline-delimited JSON. |
@@ -113,6 +115,10 @@ All paths in this table use `SANDBOX_ADMIN_TOKEN` as a bearer token.
 | `DELETE /admin/episodes/{id}` | Remove a closed episode or its on-disk archive. |
 
 Round changes, resets, and closes return HTTP 409 while an admitted MCP POST is in flight. If archive publication fails, the episode remains active so the administrator can retry closing it.
+
+Pass `?generation=N` to pin snapshot, events, reset, close, or delete to a known generation. Round changes also accept the generation in the request body. A stale generation returns HTTP 409.
+
+Reusing an episode ID with different parameters, or retrying an ID whose evidence was deleted, returns HTTP 409. With archiving enabled, the service reserves the ID and token across restarts. An unsealed episode that is lost on restart also requires a new ID and token.
 
 The Runner pins the generation for round changes, snapshots, and closing. Manual clients can use `/mcp` in generation 1. After a reset, use `/mcp/<episodeId>/<generation>` with the new generation reported by the reset response. A retired token cannot open a new episode.
 
@@ -124,7 +130,9 @@ To simulate an order that committed before timing out, pass this fault plan when
 }
 ```
 
-`TIMEOUT_COMMITTED` and `TIMEOUT_NOT_COMMITTED` both return HTTP 504. The former runs the tool before substituting the 504. `CONNECTION_FAIL` returns 502 and `AUTH_401` returns 401. Transport faults also accept `mode: "rpc-error"` to emit a JSON-RPC error under HTTP 200, and `delaySeconds` to delay the response. Business faults `SOLD_OUT`, `STORE_CLOSED`, and `COUPON_INVALID` take a product, store, or coupon ID in `target`. They can apply at episode start via `"at": "start"`. Faults can target a named tool or all calls via `"*"`, and `persist: true` repeats a fault from its configured call onward.
+`TIMEOUT_COMMITTED` and `TIMEOUT_NOT_COMMITTED` both return HTTP 504. The former runs the tool before substituting the 504. `CONNECTION_FAIL` returns 502 and `AUTH_401` returns 401. Transport faults also accept `mode: "rpc-error"` to emit a JSON-RPC error under HTTP 200, and `delaySeconds` to delay the response. Business faults `SOLD_OUT`, `STORE_CLOSED`, and `COUPON_INVALID` take a product, store, or coupon ID in `target`. They can apply at episode start via `"at": "start"`.
+
+For call-triggered faults, `nth` counts calls to the selected tool, or all tool calls when the selector is `"*"`. Set `persist: true` to reapply the fault on later matching calls. A business fault changes the simulated state for the rest of the generation even when it triggers only once. Reset restores the initial state and rearms the call-triggered plan. Start faults are part of that initial state.
 
 Each version 1 `tool.call` event includes the run ID, generation, request ID, JSON-RPC ID, arguments, optional MCP metadata, triggered and skipped faults, business result, entity changes, and transport observations. Entity changes contain the before and after values. A delayed timeout can record an order creation, a planned HTTP 504, and a disconnect with no submitted HTTP status. `emitted` means the response was handed to the ASGI server. Client receipt requires client-side evidence.
 

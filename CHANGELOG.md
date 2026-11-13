@@ -29,3 +29,6 @@
 - Share clarification policies across monitor modes and validate replayed replies against scenario actions.
 - Preserve matching quotes across comparisons and include reservation details in order receipts.
 - Keep business verdicts available when only the diagnostic Iris trace is missing.
+- Enforce generation checks for episode management and event export.
+- Keep archived episode creation idempotent across restarts and retire deleted episode IDs.
+- Document and verify quote reuse and business fault lifetime in McDelivery scenarios.
