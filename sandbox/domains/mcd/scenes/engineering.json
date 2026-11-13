@@ -1,0 +1,48 @@
+{
+  "scene_id": "engineering",
+  "clock": "2026-11-10 12:00:00",
+  "requireMatchingQuote": true,
+  "addresses": [
+    {
+      "addressId": "addr_001",
+      "tag": "公司",
+      "contactName": "沙箱用户",
+      "phone": "13800000001",
+      "fullAddress": "深圳市南山区示例路 18 号 A 座前台"
+    }
+  ],
+  "stores": [
+    {
+      "storeCode": "mock_store_001",
+      "beCode": "mock_delivery_001",
+      "storeName": "麦当劳南山示例餐厅",
+      "address": "深圳市南山区示例路 18 号",
+      "businessStartTime": "07:00",
+      "businessEndTime": "22:00",
+      "deliverTo": ["addr_001"],
+      "deliveryFeeFen": 600,
+      "menu": "default"
+    }
+  ],
+  "menus": {
+    "default": {
+      "categories": [{"name": "套餐", "meals": [{"code": "meal_001"}, {"code": "meal_other"}]}],
+      "meals": {
+        "meal_001": {"name": "香辣鸡腿堡套餐", "productType": 1, "currentPrice": "29", "image": ""},
+        "meal_other": {"name": "麦香鱼套餐", "productType": 1, "currentPrice": "27", "image": ""}
+      }
+    }
+  },
+  "coupons": [],
+  "claimableCoupons": [
+    {
+      "couponId": "Coupon001",
+      "couponCode": "Meal001",
+      "title": "香辣鸡腿堡套餐券",
+      "appliesTo": ["meal_001"],
+      "discountFen": 500,
+      "validFrom": "10:00",
+      "validTo": "21:00"
+    }
+  ]
+}

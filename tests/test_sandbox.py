@@ -10,6 +10,47 @@ def body(response):
     return json.loads(response.raise_for_status().json()["result"]["content"][0]["text"])
 
 
+def test_engineering_fixture_records_address_and_coupon_changes(client):
+    episode = start(client, scene="engineering")
+    names = {tool["name"] for tool in rpc(client, "tools/list", {}).json()["result"]["tools"]}
+    assert {"delivery-update-address", "available-coupons", "auto-bind-coupons"} <= names
+    updated = {"addressId": "addr_001", "address": "深圳市南山区示例路 18 号 B 座前台", "phone": "13800000002"}
+    assert body(tool(client, "delivery-update-address", updated))["success"]
+    address, = body(tool(client, "delivery-query-addresses"))["data"]["addresses"]
+    assert address["fullAddress"] == updated["address"]
+    assert address["phone"] == "138****0002"
+    assert body(tool(client, "available-coupons"))["data"][0]["couponId"] == "Coupon001"
+    tool(client, "auto-bind-coupons").raise_for_status()
+    assert body(tool(client, "available-coupons"))["data"] == []
+    tool(client, "auto-bind-coupons").raise_for_status()
+    snapshot = admin(client, episode, "snapshot").json()
+    assert snapshot["state"]["addresses"]["addr_001"]["phone"] == updated["phone"]
+    assert list(snapshot["state"]["coupons"]) == ["Coupon001"]
+    assert snapshot["state"]["claimableCoupons"] == {}
+    assert snapshot["calls"][-1]["business"]["success"] is False
+    assert snapshot["calls"][-1]["changes"] == []
+    assert {change["collection"] for change in snapshot["calls"][3]["changes"]} == {"coupons", "claimableCoupons"}
+
+
+def test_engineering_order_requires_matching_quote_and_supports_cancel_then_reorder(client):
+    episode = start(client, scene="engineering")
+    params = {"addressId": "addr_001", "storeCode": "mock_store_001", "beCode": "mock_delivery_001",
+              "beType": 2, "orderType": 2, "items": [{"productCode": "meal_001", "quantity": 1}]}
+    assert not body(tool(client, "create-order", params))["success"]
+    assert body(tool(client, "calculate-price", params))["data"]["price"] == 3500
+    first = body(tool(client, "create-order", params))["data"]["orderId"]
+    assert body(tool(client, "cancel-order", {"orderId": first, "cancelReasonCode": 1}))["data"]["cancelResult"]
+    params["items"] = [{"productCode": "meal_001", "quantity": 2}]
+    assert not body(tool(client, "create-order", params))["success"]
+    assert body(tool(client, "calculate-price", params))["data"]["price"] == 6400
+    second = body(tool(client, "create-order", params))["data"]["orderId"]
+    orders = admin(client, episode, "snapshot").json()["state"]["orders"]
+    assert first != second
+    assert orders[first]["status"] == "已取消"
+    assert orders[second]["status"] == "待支付"
+    assert orders[second]["amounts"]["totalFen"] == 6400
+
+
 def test_tool_contract_and_export(client):
     run_id = start(client)
     init = rpc(client, "initialize", {

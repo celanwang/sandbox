@@ -78,7 +78,9 @@ class Episode:
         self.scene_id = scene
         self.seed = seed
         self.faults = tuple(faults)
-        tool_schema = json.dumps(domain.tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        tools_for = getattr(domain, "tools_for", None)
+        self.tools = tools_for(scene) if tools_for else domain.tools
+        tool_schema = json.dumps(self.tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         self.tool_schema_sha256 = hashlib.sha256(tool_schema.encode()).hexdigest()
         self.lock = RLock()
         self.generation = 0
@@ -86,7 +88,8 @@ class Episode:
         self.closing = False
         self.in_flight = 0
 
-        tool_names = {tool["name"] for tool in domain.tools}
+        tool_names = {tool["name"] for tool in self.tools}
+        self.tool_names = tool_names
         world = domain.open(scene, seed)
         self.start_faults = []
         for index, fault in enumerate(self.faults):

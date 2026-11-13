@@ -70,10 +70,16 @@ def _store(ep: Episode, args: dict) -> dict:
 
 # ---------- 地址、门店、菜单 ----------
 
+def _address_view(record: dict) -> dict:
+    view = {key: record[key] for key in ("addressId", "contactName", "phone", "fullAddress")}
+    phone = view["phone"]
+    if len(phone) == 11 and phone.isascii() and phone.isdecimal():
+        view["phone"] = f"{phone[:3]}****{phone[-4:]}"
+    return view
+
+
 def delivery_query_addresses(ep: Episode, args: dict) -> Result:
-    addresses = [{k: a[k] for k in ("addressId", "contactName", "phone", "fullAddress")}
-                 for a in ep.world["addresses"]]
-    return envelope(ep, {"addresses": addresses})
+    return envelope(ep, {"addresses": [_address_view(record) for record in ep.world["addresses"]]})
 
 
 def delivery_create_address(ep: Episode, args: dict) -> Result:
@@ -96,7 +102,21 @@ def delivery_create_address(ep: Episode, args: dict) -> Result:
     for store in ep.world["stores"]:
         if store["storeCode"] in stores:
             store.setdefault("deliverTo", []).append(address_id)
-    return envelope(ep, {k: record[k] for k in ("addressId", "contactName", "phone", "fullAddress")})
+    return envelope(ep, _address_view(record))
+
+
+def delivery_update_address(ep: Episode, args: dict) -> Result:
+    _require(args, "addressId", "address", "phone")
+    record = W.find_address(ep.world, args["addressId"])
+    if record is None:
+        return _fail(ep, "地址不存在", code=404)
+    address, phone = args["address"], args["phone"]
+    if not isinstance(address, str) or not address.strip():
+        raise ParamError("address 必须是非空地址")
+    if not isinstance(phone, str) or len(phone) != 11 or not phone.isascii() or not phone.isdecimal():
+        raise ParamError("phone 必须是 11 位数字的字符串")
+    record.update(fullAddress=address.strip(), phone=phone)
+    return envelope(ep, _address_view(record))
 
 
 def delivery_query_stores(ep: Episode, args: dict) -> Result:
@@ -188,6 +208,31 @@ def query_my_coupons(ep: Episode, args: dict) -> Result:
     return RawText("\n".join(lines) + "\n")
 
 
+def _claimable_coupons(ep: Episode) -> list[dict]:
+    now = W.clock(ep.world)
+    return [coupon for coupon in ep.world["claimableCoupons"]
+            if coupon_valid(coupon, now) and coupon["couponId"] not in ep.world["invalidCoupons"]]
+
+
+def available_coupons(ep: Episode, args: dict) -> Result:
+    return envelope(ep, [{key: coupon[key] for key in ("couponId", "couponCode", "title")}
+                         for coupon in _claimable_coupons(ep)])
+
+
+def auto_bind_coupons(ep: Episode, args: dict) -> Result:
+    claimable = _claimable_coupons(ep)
+    if not claimable:
+        return RawText("### 领券失败\n错误信息：暂无可领取的优惠券", success=False)
+    for coupon in claimable:
+        ep.world["claimableCoupons"].remove(coupon)
+        ep.world["coupons"].append(coupon)
+    count = len(claimable)
+    lines = ["### 领券结果", f"总计: {count} 张优惠券", f"成功: {count} 张", "失败: 0 张"]
+    for coupon in claimable:
+        lines.extend([f"  - couponId：{coupon['couponId']}", f"  - couponCode：{coupon['couponCode']}"])
+    return RawText("\n".join(lines) + "\n")
+
+
 def now_time_info(ep: Episode, args: dict) -> Result:
     now = W.clock(ep.world)
     aware = now.replace(tzinfo=timezone(timedelta(hours=8)))
@@ -253,6 +298,8 @@ def create_order(ep: Episode, args: dict) -> Result:
         return _fail(ep, str(e))
     last_quote = next((quote for quote in reversed(ep.world["quotes"])
                        if quote["contentKey"] == priced.content_key and quote["priceFen"] == priced.price), None)
+    if ep.world.get("requireMatchingQuote") and last_quote is None:
+        return _fail(ep, "未找到与订单匹配的报价")
     n = len(ep.world["orders"]) + 1
     order = O.build_order(
         order_id=O.new_order_id(ep.scene_id, ep.seed, n),
@@ -309,11 +356,14 @@ def cancel_order(ep: Episode, args: dict) -> Result:
 HANDLERS: dict[str, Handler] = {
     "delivery-query-addresses": delivery_query_addresses,
     "delivery-create-address": delivery_create_address,
+    "delivery-update-address": delivery_update_address,
     "delivery-query-stores": delivery_query_stores,
     "query-meals": query_meals,
     "query-meal-detail": query_meal_detail,
     "query-store-coupons": query_store_coupons,
     "query-my-coupons": query_my_coupons,
+    "available-coupons": available_coupons,
+    "auto-bind-coupons": auto_bind_coupons,
     "now-time-info": now_time_info,
     "calculate-price": calculate_price,
     "create-order": create_order,
@@ -325,7 +375,7 @@ HANDLERS: dict[str, Handler] = {
 
 def dispatch(ep: Episode, tool: str, args: dict) -> Result:
     handler = HANDLERS.get(tool)
-    if handler is None:
+    if handler is None or tool not in ep.tool_names:
         return _fail(ep, "沙箱暂不支持该工具", code=501)
     failed_data = dict(CANCEL_FAILED) if tool == "cancel-order" else None
     try:

@@ -12,10 +12,14 @@ from sandbox.domains.mcd.world.variants import apply_variant
 class McDelivery:
     name = "mcd"
     tools = json.loads(Path(__file__).with_name("tools.json").read_text(encoding="utf-8"))
+    engineering_tools = json.loads(Path(__file__).with_name("engineering_tools.json").read_text(encoding="utf-8"))
     business_faults = frozenset({"SOLD_OUT", "STORE_CLOSED", "COUPON_INVALID"})
 
     def scenes(self) -> list[str]:
         return list_scenes()
+
+    def tools_for(self, scene: str) -> list[dict]:
+        return [*self.tools, *self.engineering_tools] if scene == "engineering" else self.tools
 
     def open(self, scene: str, seed: int) -> dict:
         world = apply_variant(load_scene(scene), seed)
@@ -23,7 +27,7 @@ class McDelivery:
         return world
 
     def state(self, world: dict) -> dict[str, dict]:
-        return {
+        state = {
             "clock": {"now": world["clock"]},
             "addresses": {row["addressId"]: row for row in world["addresses"]},
             "stores": {row["storeCode"]: row for row in world["stores"]},
@@ -34,6 +38,9 @@ class McDelivery:
             "quotes": {str(row["callSeq"]): row for row in world["quotes"]},
             "orders": {row["orderId"]: row for row in world["orders"]},
         }
+        if "claimableCoupons" in world:
+            state["claimableCoupons"] = {row["couponId"]: row for row in world["claimableCoupons"]}
+        return state
 
     def fault(self, world: dict, fault: Fault) -> None:
         target = fault.target
@@ -46,7 +53,8 @@ class McDelivery:
                 if store["storeCode"] == target:
                     store["forceClosed"] = True
                     return
-        if fault.type == "COUPON_INVALID" and any(coupon["couponId"] == target for coupon in world["coupons"]):
+        if fault.type == "COUPON_INVALID" and any(
+                coupon["couponId"] == target for coupon in world["coupons"] + world.get("claimableCoupons", [])):
             if target not in world["invalidCoupons"]:
                 world["invalidCoupons"].append(target)
             return

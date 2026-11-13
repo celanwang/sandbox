@@ -66,7 +66,7 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
     @server.list_tools()
     async def tools() -> list[types.Tool]:
         episode = server.request_context.request.scope["sandbox.episode"]
-        return [types.Tool.model_validate(tool) for tool in episode.domain.tools]
+        return [types.Tool.model_validate(tool) for tool in episode.tools]
 
     @server.call_tool(validate_input=False)
     async def call(name: str, arguments: dict) -> types.CallToolResult:

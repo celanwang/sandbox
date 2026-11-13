@@ -1,0 +1,25 @@
+[
+  {
+    "name": "delivery-update-address",
+    "description": "更新已保存的麦乐送地址和联系电话。使用查询返回的 addressId，传入完整新地址和 11 位手机号。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "addressId": {"type": "string"},
+        "address": {"type": "string"},
+        "phone": {"type": "string"}
+      },
+      "required": ["addressId", "address", "phone"]
+    }
+  },
+  {
+    "name": "available-coupons",
+    "description": "查询当前账户可领取的麦乐送优惠券。",
+    "inputSchema": {"type": "object", "properties": {}}
+  },
+  {
+    "name": "auto-bind-coupons",
+    "description": "领取当前账户全部可领的麦乐送优惠券，返回实际领取结果。",
+    "inputSchema": {"type": "object", "properties": {}}
+  }
+]
