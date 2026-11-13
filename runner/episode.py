@@ -202,7 +202,7 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                 except Exception as snapshot_error:
                     evidence["errors"]["sandbox.snapshot"] = error_message(snapshot_error)
 
-    if evidence["errors"] and evidence["status"] == "complete":
+    if evidence["errors"].keys() - {"iris.trace"} and evidence["status"] == "complete":
         evidence["status"] = "capture_error"
     snapshot = evidence["sandbox"]
     if evidence["preflight"].get("verified") and not preflight_retained(evidence):

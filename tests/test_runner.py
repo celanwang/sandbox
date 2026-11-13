@@ -121,9 +121,24 @@ def test_trace_failure_preserves_sandbox_evidence(client, sandbox_client):
     fake = FakeIris(client, "order", trace_available=False)
     with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
         evidence = run_episode("order", Iris(iris_http), sandbox_client)
-    assert evidence["status"] == "capture_error"
-    assert evidence["verdict"]["status"] == "unavailable"
+    assert evidence["status"] == "complete"
+    assert evidence["verdict"]["status"] == "passed"
     assert "HTTP 503" in evidence["errors"]["iris.trace"]
+    assert len(evidence["sandbox"]["state"]["orders"]) == 1
+
+
+def test_state_failure_prevents_a_business_verdict(client, sandbox_client):
+    class NoFinalState(FakeIris):
+        def handle(self, request):
+            if request.url.path == "/api/agent/state" and self.confirmations:
+                return httpx.Response(503)
+            return super().handle(request)
+
+    fake = NoFinalState(client, "order")
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(fake.handle)) as iris_http:
+        evidence = run_episode("order", Iris(iris_http), sandbox_client)
+    assert evidence["verdict"]["status"] == "unavailable"
+    assert "HTTP 503" in evidence["errors"]["iris.state"]
     assert len(evidence["sandbox"]["state"]["orders"]) == 1
 
 
