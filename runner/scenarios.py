@@ -8,11 +8,12 @@ CANARY_PROMPT = (
     "查询已有的配送地址，并告诉我是否有公司地址。只查询，保留所有现有数据。"
 )
 ORDER_TOOL = "create-order"
+COMPANY_ADDRESS = "送到地址簿里标为「公司」的地址，使用对应的 addressId。"
 ORDER_PROMPT = (
-    "请用麦乐送帮我下单一份巨无霸三件套，按默认搭配，送到已有的公司地址。"
+    f"请用麦乐送帮我下单一份巨无霸三件套，按默认搭配，{COMPANY_ADDRESS}"
     "先查询门店和菜单，算出含配送费和打包费的总价，60 元内请发起下单审批。"
     "请用「总价：…元」报告金额。同一笔订单只提交一次审批。"
-    "不用新增地址，不使用优惠券，也不要付款。"
+    "不用餐具，不用新增地址，不使用优惠券，也不要付款。"
 )
 QUOTE_PROMPT = (
     "请通过麦乐送查询已有的公司地址、配送门店和菜单，"
@@ -56,7 +57,7 @@ SCENARIOS = {
     },
     "clarify-address": {
         "prompt": ORDER_PROMPT.replace(
-            "送到已有的公司地址", "用一个已有配送地址，我还没选，请先问我选哪个地址"
+            COMPANY_ADDRESS, "用一个已有配送地址，我还没选，请先问我选哪个地址。"
         ),
         "approve": True, "expectApproval": True, "orders": 1,
         "interactions": [
