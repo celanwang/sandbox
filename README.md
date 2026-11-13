@@ -42,7 +42,7 @@ curl -fsS http://127.0.0.1:8100/mcp \
 
 ## Run workflows with Iris
 
-The Iris engineering evaluator can use the McDelivery `engineering` fixture for its existing dining cases. It keeps the original test data and adds address updates and coupon claiming to the tools exposed in that fixture. Run it from the Iris checkout with `python3.11 mock/run_eval.py --sandbox-repo /path/to/sandbox`. The evaluator opens one isolated episode per case and saves its final snapshot with the step results.
+The Iris engineering evaluator can use the McDelivery `engineering` fixture for its existing dining cases. It keeps the original test data and adds address updates and coupon claiming to the tools exposed in that fixture. Start Sandbox independently, then set `EVAL_SANDBOX_URL` and `EVAL_SANDBOX_ADMIN_TOKEN` in the Iris evaluation environment. Run `python3.11 eval/run_eval.py` from the Iris checkout. The evaluator opens one isolated episode per case and saves its final snapshot with the step results. The Iris revision pinned to the original `dev-v1.0.0` release uses the earlier `mock/run_eval.py --sandbox-repo` entry point.
 
 Each order in `engineering` requires a previous quote in the same generation with a matching store, basket, and total. The order snapshot records the quote's call sequence and round in `lastQuote`. The same basket can match an earlier quote after cancellation. The Iris evaluator checks that an order uses a quote from the step that requested approval when that flow requires a fresh quote.
 
