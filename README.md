@@ -56,6 +56,20 @@ Each invocation runs one scenario. To run another scenario, create a fresh ID an
 
 The timeout scenarios verify the injected response, the order state and Iris ledger, a read-only lookup after the timeout, and the user-visible conclusion. Evidence groups lookups by whether they started before the timeout, after the timeout without a user prompt, or after the scripted follow-up. A prompted lookup can satisfy the scenario and is recorded separately from autonomous recovery. The verdict also checks explicit amount, payment, and delivery claims. Provide `--iris-revision` to record the build revision alongside the observed model names, scenario settings, and trace limitations.
 
+### Run the local regression suite
+
+Use a dedicated local PostgreSQL database with pgvector, a local Redis instance, and an Iris checkout with its model credentials configured in `.env` or the environment. The default test endpoints are PostgreSQL port 54328 and Redis port 59000. The suite uses database `iris_eval`, PostgreSQL user `postgres`, and Redis database 13 by default. It initializes the schema from the Iris checkout. Java 17 and Maven must be on PATH.
+
+```sh
+export IRIS_REGRESSION_DB_PASSWORD='<local test database password>'
+export MONITOR_DASHSCOPE_API_KEY='<Bailian API key>'
+python -m runner.regression --iris-repo /path/to/Iris
+```
+
+Pass scenario names such as `timeout-before clarify-address` to run a subset. The full suite runs quote, order, denial, budget, both timeout variants, and both clarification scenarios. The clarification cases use Monitor active mode. The command builds Iris once, starts Sandbox on a loopback port, and runs each scenario in a fresh Iris process with its own MCP credentials. It shuts down the processes it starts.
+
+The batch `summary.json` links to each case's evidence and lists the verdict and failed checks. The per-case `summary.json` shows the initial query, Iris replies observed by Monitor, matched intents and their evidence, the actual scripted follow-ups, and the final reply. A missing Iris trace is listed under diagnostics. A missing Iris ledger or verified Sandbox snapshot makes the verdict unavailable. Run artifacts and server logs are stored under `runs/regression/` unless overridden with `--out`.
+
 ### Run the intent monitor
 
 `monitor` classifies user-visible dialogue with Bailian `qwen3.8-flash`. It receives the latest Iris reply, a bounded dialogue history, and the intent definitions for the current turn. The runner maps validated matches to scenario-owned replies. Iris approvals still use the pending ledger entry and deterministic scenario checks.

@@ -10,6 +10,7 @@
 - Archive closed episodes on disk and list or purge them through the management API.
 - Use Qwen 3.8 Flash to recognize scripted dialogue intents in shadow or active mode.
 - Exercise address and drink clarification and replay recorded monitor decisions from evidence.
+- Run a local regression suite with a fresh Iris process per scenario and export batch and dialogue summaries.
 
 ### Changed
 
@@ -24,3 +25,4 @@
 - Reject contradictory payment and delivery claims and classify recovery lookups by timing.
 - Share clarification policies across monitor modes and validate replayed replies against scenario actions.
 - Preserve matching quotes across comparisons and include reservation details in order receipts.
+- Keep business verdicts available when only the diagnostic Iris trace is missing.
