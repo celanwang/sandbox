@@ -15,6 +15,7 @@ from runner.clients import Iris, Sandbox
 from runner.episode import run_episode
 from runner.report import save_report, summarize
 from runner.scenarios import SCENARIOS
+from sandbox.config import load_local_env
 from sandbox.storage import write_atomic
 
 
@@ -54,13 +55,15 @@ def run_case(scenario: str, *, iris_url: str, sandbox_url: str, admin_token: str
 
 
 def main() -> int:
+    load_local_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", nargs="?", choices=SCENARIOS, default="order")
     parser.add_argument("--iris", default="http://127.0.0.1:8080/api")
     parser.add_argument("--sandbox", default="http://127.0.0.1:8100")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iris-revision", help="Iris build revision to include in the evidence")
-    parser.add_argument("--episode-id", help="preassigned episode ID for an episode-scoped MCP URL")
+    parser.add_argument("--episode-id", default=os.environ.get("SANDBOX_EPISODE_ID") or None,
+                        help="preassigned episode ID (default: SANDBOX_EPISODE_ID)")
     parser.add_argument("--monitor", choices=("off", "shadow", "active"), default="off",
                         help="record intent decisions or use them for configured scenario replies")
     parser.add_argument("--out", type=Path, default=Path("runs"))

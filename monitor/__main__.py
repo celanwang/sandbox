@@ -8,6 +8,7 @@ from pathlib import Path
 from monitor import Decision, Observation
 from monitor.qwen import QwenRecognizer, api_key, model_client
 from runner.interactions import LEGACY_REPLY, POLICY_VERSION, keyword_actions, select_actions
+from sandbox.config import load_local_env
 
 
 def replay(path: Path, recognizer: QwenRecognizer | None) -> list[dict]:
@@ -115,6 +116,8 @@ def main() -> int:
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--reclassify", action="store_true", help="send captured monitor inputs to Qwen again")
     args = parser.parse_args()
+    if args.reclassify:
+        load_local_env()
     key = api_key() if args.reclassify else ""
     if args.reclassify and not key:
         parser.error("set MONITOR_DASHSCOPE_API_KEY or DASHSCOPE_API_KEY")

@@ -19,6 +19,7 @@ from monitor.qwen import api_key
 from runner.__main__ import run_case, save, source_revision
 from runner.report import save_report, summarize
 from runner.scenarios import SCENARIOS
+from sandbox.config import load_local_env
 
 
 SANDBOX_ROOT = Path(__file__).resolve().parents[1]
@@ -163,14 +164,18 @@ def run_suite(args, batch: Path, key: str) -> int:
 
 
 def main() -> int:
+    load_local_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenarios", nargs="*", metavar="SCENARIO", help="default: all eight scenarios")
-    parser.add_argument("--iris-repo", type=Path, required=True)
-    parser.add_argument("--pg-port", type=int, default=54328)
-    parser.add_argument("--database", default="iris_eval")
-    parser.add_argument("--db-user", default="postgres")
-    parser.add_argument("--redis-port", type=int, default=59000)
-    parser.add_argument("--redis-db", type=int, choices=range(16), default=13, metavar="0..15")
+    iris_repo = os.environ.get("IRIS_REGRESSION_REPO")
+    parser.add_argument("--iris-repo", type=Path, default=SANDBOX_ROOT / iris_repo if iris_repo else None,
+                        help="Iris checkout (default: IRIS_REGRESSION_REPO, relative to the Sandbox root)")
+    parser.add_argument("--pg-port", type=int, default=os.environ.get("IRIS_REGRESSION_PG_PORT", "54328"))
+    parser.add_argument("--database", default=os.environ.get("IRIS_REGRESSION_DB_NAME", "iris_eval"))
+    parser.add_argument("--db-user", default=os.environ.get("IRIS_REGRESSION_DB_USER", "postgres"))
+    parser.add_argument("--redis-port", type=int, default=os.environ.get("IRIS_REGRESSION_REDIS_PORT", "59000"))
+    parser.add_argument("--redis-db", type=int,
+                        default=os.environ.get("IRIS_REGRESSION_REDIS_DB", "13"), metavar="0..15")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("runs/regression"))
     args = parser.parse_args()
@@ -178,12 +183,14 @@ def main() -> int:
     for scenario in args.scenarios:
         if scenario not in SCENARIOS:
             parser.error(f"unknown scenario {scenario!r}; choose from {', '.join(SCENARIOS)}")
-    if not (args.iris_repo / "docs/schema.sql").is_file() or not (args.iris_repo / "pom.xml").is_file():
-        parser.error("--iris-repo must point to an Iris checkout")
+    if args.iris_repo is None or not all((args.iris_repo / name).is_file() for name in ("docs/schema.sql", "pom.xml")):
+        parser.error("set --iris-repo or IRIS_REGRESSION_REPO to an Iris checkout")
     if not shutil.which("java") or not shutil.which("mvn"):
         parser.error("Java and Maven must be available on PATH")
     if any(not 1 <= port <= 65535 for port in (args.pg_port, args.redis_port)):
         parser.error("PostgreSQL and Redis ports must be between 1 and 65535")
+    if not 0 <= args.redis_db <= 15:
+        parser.error("Redis database must be between 0 and 15")
     if not re.fullmatch(r"[A-Za-z0-9_]+", args.database):
         parser.error("--database must contain only letters, digits, or underscores")
     key = api_key()

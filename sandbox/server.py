@@ -26,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 
+from sandbox.config import load_local_env
 from sandbox.domains.mcd import McDelivery
 from sandbox.episodes import Domain, EpisodeConflict, EpisodeStore, Fault, HTTP_FAULTS
 
@@ -314,6 +315,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--archive-dir", type=Path, help="store closed episode snapshots on disk")
     args = parser.parse_args()
+    load_local_env()
     uvicorn.run(create_app(archive_dir=args.archive_dir), host="127.0.0.1", port=args.port)
 
 
