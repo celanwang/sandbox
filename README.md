@@ -6,23 +6,28 @@ Sandbox runs simulated services independently of the application under test. The
 
 ## Run the sandbox
 
-Use Python 3.11 or newer from the repository root.
+Use Python 3.11 or newer from the repository root. Copy `.env.example` to `.env` on first setup and fill in the values for the commands you use. Sandbox, Runner, the regression suite, and Monitor reclassification read `.env` from the Sandbox checkout. Command-line flags override the corresponding environment defaults, and exported variables override the same keys in `.env`. The local file is gitignored.
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
+cp .env.example .env
+```
 
-export SANDBOX_ADMIN_TOKEN="$(openssl rand -hex 24)"
-export MCD_MCP_TOKEN="$(openssl rand -hex 24)"
+For manual use, generate an admin token with `openssl rand -hex 24` and set `SANDBOX_ADMIN_TOKEN` in `.env` or export it before starting the service.
+
+```sh
 python -m sandbox.server
 ```
 
 The service listens on `127.0.0.1:8100`. The admin bearer token manages episodes. Generate a fresh MCP bearer token for each episode. Start with `--archive-dir runs/sandbox-archive` to retain closed snapshots and token claims across restarts. Use one server process per archive directory.
 
-To open an episode and list its tools without Iris, run the following in another terminal.
+To open an episode and list its tools without Iris, run the following in another terminal. Export the same admin token there for `curl`, and generate a fresh MCP token.
 
 ```sh
+export SANDBOX_ADMIN_TOKEN='<same admin token>'
+export MCD_MCP_TOKEN="$(openssl rand -hex 24)"
 curl -fsS http://127.0.0.1:8100/admin/episodes \
   -H "Authorization: Bearer $SANDBOX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
@@ -46,10 +51,10 @@ export MCD_MCP_URL="http://127.0.0.1:8100/mcp/$SANDBOX_EPISODE_ID/1"
 export IRIS_AUTO_REVIEW=false
 ```
 
-With Sandbox and Iris running, start the runner from the Sandbox repository. The runner opens each episode, asks Iris to query delivery addresses, and checks for that call in the new episode before sending the scenario prompt. It approves a matching create-order request at most once, after verifying the quote and budget.
+With Sandbox and Iris running, start the runner from the Sandbox repository. If you use a separate terminal for the runner, export the same `SANDBOX_EPISODE_ID` and `MCD_MCP_TOKEN` there or set them in the Sandbox `.env`. The runner opens each episode, asks Iris to query delivery addresses, and checks for that call in the new episode before sending the scenario prompt. It approves a matching create-order request at most once, after verifying the quote and budget.
 
 ```sh
-python -m runner order --episode-id "$SANDBOX_EPISODE_ID" --iris http://127.0.0.1:8080/api
+python -m runner order --iris http://127.0.0.1:8080/api
 ```
 
 Each invocation runs one scenario. To run another scenario, create a fresh ID and token and restart Iris with those values. Iris caches the MCP client configuration for its process. The Runner retries an ambiguous episode-open response using the same ID. It writes `evidence.json` and `events.jsonl` under `runs/<batch>/<scenario>/` and exits nonzero for a failed or unavailable verdict.
@@ -58,15 +63,13 @@ The timeout scenarios verify the injected response, the order state and Iris led
 
 ### Run the local regression suite
 
-Use a dedicated local PostgreSQL database with pgvector, a local Redis instance, and an Iris checkout with its model credentials configured in `.env` or the environment. The default test endpoints are PostgreSQL port 54328 and Redis port 59000. The suite uses database `iris_eval`, PostgreSQL user `postgres`, and Redis database 13 by default. It initializes the schema from the Iris checkout. Java 17 and Maven must be on PATH.
+Use a dedicated local PostgreSQL database with pgvector, a local Redis instance, and an Iris checkout with its model credentials configured in the Iris `.env` or process environment. In the Sandbox `.env`, set `IRIS_REGRESSION_REPO` and the local database credentials. Set `MONITOR_DASHSCOPE_API_KEY` there to include the clarification scenarios. Relative values for `IRIS_REGRESSION_REPO` are resolved from the Sandbox root. The suite initializes the Iris schema and uses the test ports, database, and Redis database shown in `.env.example`. Java 17 and Maven must be on PATH.
 
 ```sh
-export IRIS_REGRESSION_DB_PASSWORD='<local test database password>'
-export MONITOR_DASHSCOPE_API_KEY='<Bailian API key>'
-python -m runner.regression --iris-repo /path/to/Iris
+python -m runner.regression
 ```
 
-Pass scenario names such as `timeout-before clarify-address` to run a subset. The full suite runs quote, order, denial, budget, both timeout variants, and both clarification scenarios. The clarification cases use Monitor active mode. The command builds Iris once, starts Sandbox on a loopback port, and runs each scenario in a fresh Iris process with its own MCP credentials. It shuts down the processes it starts.
+Pass scenario names such as `timeout-before clarify-address` to run a subset. The full suite runs quote, order, denial, budget, both timeout variants, and both clarification scenarios. The clarification cases use Monitor active mode. The command builds Iris once, starts Sandbox on a loopback port, and runs each scenario in a fresh Iris process with its own MCP credentials. It generates the admin token, episode IDs, and MCP tokens and shuts down the processes it starts. To override the configured checkout for a run, pass `--iris-repo /path/to/Iris`.
 
 The batch `summary.json` links to each case's evidence and lists the verdict and failed checks. The per-case `summary.json` shows the initial query, Iris replies observed by Monitor, matched intents and their evidence, the actual scripted follow-ups, and the final reply. A missing Iris trace is listed under diagnostics. A missing Iris ledger or verified Sandbox snapshot makes the verdict unavailable. Run artifacts and server logs are stored under `runs/regression/` unless overridden with `--out`.
 
@@ -75,8 +78,7 @@ The batch `summary.json` links to each case's evidence and lists the verdict and
 `monitor` classifies user-visible dialogue with Bailian `qwen3.8-flash`. It receives the latest Iris reply, a bounded dialogue history, and the intent definitions for the current turn. The runner maps validated matches to scenario-owned replies. Iris approvals still use the pending ledger entry and deterministic scenario checks.
 
 ```sh
-export MONITOR_DASHSCOPE_API_KEY='<your Bailian API key>'
-python -m runner clarify-address --episode-id "$SANDBOX_EPISODE_ID" --monitor active
+python -m runner clarify-address --monitor active
 ```
 
 `DASHSCOPE_API_KEY` can supply the key if `MONITOR_DASHSCOPE_API_KEY` is unset. Set `MONITOR_BASE_URL` to use a workspace-specific OpenAI-compatible base URL.

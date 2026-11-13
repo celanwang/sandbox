@@ -11,6 +11,7 @@
 - Use Qwen 3.8 Flash to recognize scripted dialogue intents in shadow or active mode.
 - Exercise address and drink clarification and replay recorded monitor decisions from evidence.
 - Run a local regression suite with a fresh Iris process per scenario and export batch and dialogue summaries.
+- Load local Sandbox, Runner, and Monitor settings from a shared `.env` template.
 
 ### Changed
 
