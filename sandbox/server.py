@@ -230,17 +230,19 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
         episode = store.get(episode_id)
         if episode is None:
             try:
-                if request.method == "DELETE" and await run_in_threadpool(store.delete_archive, episode_id):
+                if request.method == "DELETE" and await run_in_threadpool(store.delete_archive, episode_id, generation):
                     return Response(status_code=204)
                 archived = await run_in_threadpool(store.archived, episode_id)
+            except EpisodeConflict as error:
+                return JSONResponse({"error": str(error)}, status_code=409)
             except (OSError, ValueError):
                 log.exception("Could not access episode archive %s", episode_id)
                 return JSONResponse({"error": "episode archive unavailable"}, status_code=503)
             if archived is None:
                 return JSONResponse({"error": "episode not found"}, status_code=404)
+            if generation is not None and generation != archived["generation"]:
+                return JSONResponse({"error": "episode generation changed"}, status_code=409)
             if (action, request.method) in {("snapshot", "GET"), ("close", "POST")}:
-                if generation is not None and generation != archived["generation"]:
-                    return JSONResponse({"error": "episode generation changed"}, status_code=409)
                 return JSONResponse(archived)
             if action == "events" and request.method == "GET":
                 return event_stream(archived["calls"])
@@ -249,20 +251,17 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             return JSONResponse({"error": "unknown episode action"}, status_code=404)
         if request.method == "DELETE":
             try:
-                store.delete(episode)
+                store.delete(episode, generation)
             except EpisodeConflict as error:
                 return JSONResponse({"error": str(error)}, status_code=409)
             return Response(status_code=204)
-        if request.method == "GET":
-            if action == "snapshot":
-                snapshot = episode.snapshot()
-                if generation is not None and generation != snapshot["generation"]:
-                    return JSONResponse({"error": "episode generation changed"}, status_code=409)
-                return JSONResponse(snapshot)
-            if action == "events":
-                return event_stream(episode.events())
-        if request.method == "POST":
-            try:
+        try:
+            if request.method == "GET":
+                if action == "snapshot":
+                    return JSONResponse(episode.snapshot(generation))
+                if action == "events":
+                    return event_stream(episode.events(generation))
+            if request.method == "POST":
                 if action == "close":
                     try:
                         snapshot = await run_in_threadpool(store.close, episode, generation)
@@ -271,22 +270,25 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
                         return JSONResponse({"error": "could not archive episode"}, status_code=503)
                     return JSONResponse(snapshot)
                 if action == "reset":
-                    episode.reset()
-                    return JSONResponse(episode.snapshot())
+                    with episode.lock:
+                        episode.reset(generation)
+                        snapshot = episode.snapshot()
+                    return JSONResponse(snapshot)
                 if action == "round":
                     value = SetRound.model_validate_json(await request.body())
+                    if generation is not None and value.generation is not None and generation != value.generation:
+                        return JSONResponse({"error": "conflicting episode generations"}, status_code=400)
                     with episode.lock:
+                        episode.require_generation(value.generation if value.generation is not None else generation)
                         if episode.closed:
                             raise EpisodeConflict("episode is closed")
-                        if value.generation is not None and episode.generation != value.generation:
-                            raise EpisodeConflict("episode generation changed")
                         episode.ensure_idle()
                         episode.round = value.round
                     return JSONResponse({"round": value.round})
-            except EpisodeConflict as error:
-                return JSONResponse({"error": str(error)}, status_code=409)
-            except ValidationError:
-                return JSONResponse({"error": "round must be a nonnegative integer"}, status_code=400)
+        except EpisodeConflict as error:
+            return JSONResponse({"error": str(error)}, status_code=409)
+        except ValidationError:
+            return JSONResponse({"error": "round must be a nonnegative integer"}, status_code=400)
         return JSONResponse({"error": "unknown episode action"}, status_code=404)
 
     def event_stream(events: list[dict]) -> StreamingResponse:

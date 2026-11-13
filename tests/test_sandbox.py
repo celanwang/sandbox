@@ -416,6 +416,46 @@ def test_old_generation_cannot_issue_requests_after_reset(client):
     assert not admin(client, episode, "snapshot").json()["state"]["orders"]
 
 
+def test_stale_management_requests_cannot_reset_or_read_the_current_generation(client):
+    episode = start(client)
+    path = f"/admin/episodes/{episode}"
+
+    def reset(_):
+        return client.post(f"{path}/reset?generation=1", headers=ADMIN)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(reset, range(2)))
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert next(response.json() for response in responses if response.status_code == 200)["generation"] == 2
+
+    tool(client, "order-list", endpoint=f"/mcp/{episode}/2").raise_for_status()
+    for action in ("snapshot", "events"):
+        assert client.get(f"{path}/{action}?generation=1", headers=ADMIN).status_code == 409
+    assert client.post(f"{path}/round?generation=1", headers=ADMIN, json={"round": 1}).status_code == 409
+    assert client.post(f"{path}/round?generation=2", headers=ADMIN,
+                       json={"round": 1, "generation": 1}).status_code == 400
+    assert client.post(f"{path}/reset?generation=1", headers=ADMIN).status_code == 409
+    snapshot = admin(client, episode, "snapshot", params={"generation": 2}).json()
+    assert snapshot["round"] == 0 and len(snapshot["calls"]) == 1
+    assert json.loads(admin(client, episode, "events", params={"generation": 2}).text) == snapshot["calls"][0]
+
+
+def test_archived_management_requests_respect_the_generation(tmp_path):
+    from starlette.testclient import TestClient
+
+    from sandbox.server import create_app
+
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
+        episode = start(http)
+        path = f"/admin/episodes/{episode}"
+        admin(http, episode, "reset", "POST")
+        admin(http, episode, "close", "POST", params={"generation": 2})
+        assert http.get(f"{path}/events?generation=1", headers=ADMIN).status_code == 409
+        assert http.delete(f"{path}?generation=1", headers=ADMIN).status_code == 409
+        assert admin(http, episode, "events", params={"generation": 2}).text == ""
+        assert http.delete(f"{path}?generation=2", headers=ADMIN).status_code == 204
+
+
 def test_retired_token_remains_retired_after_archived_episode_is_deleted(tmp_path):
     from starlette.testclient import TestClient
 

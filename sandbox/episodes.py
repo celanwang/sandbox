@@ -113,8 +113,13 @@ class Episode:
         self.initial_world = world
         self.reset()
 
-    def reset(self) -> None:
+    def require_generation(self, generation: int | None) -> None:
+        if generation is not None and self.generation != generation:
+            raise EpisodeConflict("episode generation changed")
+
+    def reset(self, generation: int | None = None) -> None:
         with self.lock:
+            self.require_generation(generation)
             self.ensure_idle()
             if self.closed:
                 raise EpisodeConflict("episode is closed")
@@ -212,8 +217,9 @@ class Episode:
             event["transport"].update(state=state, httpStatus=status, body=body, completedAt=utc_now(),
                                       completedMonotonicNs=monotonic_ns())
 
-    def snapshot(self) -> dict:
+    def snapshot(self, generation: int | None = None) -> dict:
         with self.lock:
+            self.require_generation(generation)
             return deepcopy({
                 "schemaVersion": SCHEMA_VERSION,
                 "runId": self.episode_id,
@@ -232,8 +238,9 @@ class Episode:
                 "calls": self.calls,
             })
 
-    def events(self) -> list[dict]:
+    def events(self, generation: int | None = None) -> list[dict]:
         with self.lock:
+            self.require_generation(generation)
             return deepcopy(self.calls)
 
 
@@ -318,26 +325,32 @@ class EpisodeStore:
         except FileNotFoundError:
             return None
 
-    def delete_archive(self, episode_id: str) -> bool:
+    def delete_archive(self, episode_id: str, generation: int | None = None) -> bool:
         path = self.archive_path(episode_id)
         if path is None:
             return False
+        if generation is not None:
+            archived = self.archived(episode_id)
+            if archived is None:
+                return False
+            if generation != archived["generation"]:
+                raise EpisodeConflict("episode generation changed")
         try:
             path.unlink()
         except FileNotFoundError:
             return False
         return True
 
-    def delete(self, episode: Episode) -> None:
-        with self.lock:
+    def delete(self, episode: Episode, generation: int | None = None) -> None:
+        with self.lock, episode.lock:
+            episode.require_generation(generation)
             if not episode.closed:
                 raise EpisodeConflict("close the episode before deleting it")
             self.episodes.pop(episode.episode_id, None)
 
     def close(self, episode: Episode, generation: int | None = None) -> dict:
         with self.lock, episode.lock:
-            if generation is not None and episode.generation != generation:
-                raise EpisodeConflict("episode generation changed")
+            episode.require_generation(generation)
             episode.ensure_idle()
             snapshot = episode.snapshot()
             if episode.closed:
