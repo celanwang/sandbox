@@ -13,7 +13,7 @@ from runner.interactions import POLICY_VERSION, keyword_actions, observe
 from runner.scenarios import (
     CANARY_PROMPT, CANARY_TOOL, DEFAULT_QUOTE_ITEMS, ORDER_BUDGET_FEN, ORDER_TOOL, READ_TOOLS, RECOVERY_PROMPT, SCENARIOS,
 )
-from runner.verdict import judge, preflight_retained, recovery_evidence, reported_totals
+from runner.verdict import judge, latest_visible_quote, preflight_retained, recovery_evidence, reported_totals
 from sandbox.domains.mcd.world.pricing import PriceError, price_items
 from sandbox.episodes import SCHEMA_VERSION, utc_now
 
@@ -121,7 +121,8 @@ def run_episode(name: str, iris: Iris, sandbox: Sandbox, *, seed: int = 0,
                         and approval["tool"] == ORDER_TOOL
                         and not any(previous["approved"] for previous in evidence["approvals"])
                         and required_actions <= delivered_actions.keys()
-                        and matching_quote(sandbox.snapshot(episode_id, generation=generation), approval, reported_totals(reply),
+                        and matching_quote(sandbox.snapshot(episode_id, generation=generation), approval,
+                                           reported_totals(latest_visible_quote(evidence["transcript"], min_quote_round)),
                                            quote_items, min_round=min_quote_round,
                                            budget_fen=scenario.get("budgetFen", ORDER_BUDGET_FEN))
                     )

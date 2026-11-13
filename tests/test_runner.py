@@ -331,6 +331,27 @@ def test_active_monitor_completes_multiturn_order(client, sandbox_client, tmp_pa
     assert row["sameIntents"] and row["recordedAction"] == decision["action"]
 
 
+@pytest.mark.parametrize(("name", "approved"), [("clarify-address", True), ("clarify-drink", False)])
+def test_visible_quote_can_carry_through_address_selection_but_not_basket_change(client, sandbox_client, name, approved):
+    fake = ClarifyingIris(client, name)
+
+    def respond(request):
+        response = fake.handle(request)
+        if request.url.path != "/api/chat" or "-scenario-" not in json.loads(request.content)["userId"]:
+            return response
+        if len(fake.scenario_prompts) == 1:
+            quote = tool(client, "calculate-price", fake.order).raise_for_status().json()
+            price = json.loads(quote["result"]["content"][0]["text"])["data"]["price"]
+            return httpx.Response(200, text=f"总价：{price / 100:.2f} 元。\n{fake.question}")
+        return httpx.Response(200, text="下单审批已发起，请查看审批。")
+
+    with httpx.Client(base_url="http://iris/api", transport=httpx.MockTransport(respond)) as iris_http:
+        evidence = run_episode(name, Iris(iris_http), sandbox_client, monitor_mode="active", recognizer=FixtureRecognizer())
+    assert [decision["approved"] for decision in evidence["approvals"]] == [approved]
+    assert evidence["verdict"]["checks"]["reportedQuote"] is approved
+    assert evidence["verdict"]["status"] == ("passed" if approved else "failed")
+
+
 @pytest.mark.parametrize(("model_status", "expected_status"), [
     ("uncertain", "monitor_uncertain"), ("unavailable", "monitor_unavailable"), ("no_match", "complete"),
 ])

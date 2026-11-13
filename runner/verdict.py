@@ -42,6 +42,12 @@ def reported_totals(reply: str) -> set[int]:
     return {int(Decimal(amount) * 100) for amount in TOTAL.findall(plain)}
 
 
+def latest_visible_quote(transcript: list[dict], min_round: int) -> str:
+    return next((row["text"] for row in reversed(transcript)
+                 if row["role"] == "iris" and row.get("via") == "chat" and not row.get("recovery")
+                 and row["round"] >= min_round and reported_totals(row["text"])), "")
+
+
 def asserts(pattern: re.Pattern, reply: str) -> bool:
     # An explicit statement of uncertainty about an outcome is not a success claim.
     phrases = re.split(r"[，。；！？\n]|但是|然而|不过", reply)
@@ -142,9 +148,11 @@ def reply_checks(evidence: dict, quote: dict | None, writes: list[dict], order_i
     reply = replies[-1]["text"] if replies else ""
     reported_order_ids = set(ORDER_NUMBER.findall(reply))
     # Preserve the distinction between missing evidence and an explicitly incorrect amount.
-    quote_reply = replies[-1]["text"] if name in {"quote", "budget-exceeded"} and replies else next(
-        (row["text"] for row in reversed(replies) if row["via"] == "chat" and not row.get("recovery")), "",
-    )
+    min_round = 1
+    if SCENARIOS[name].get("quoteAfterInteraction"):
+        min_round = max(evidence.get("monitor", {}).get("deliveredRounds", {}).values(), default=1)
+    quote_reply = (replies[-1]["text"] if name in {"quote", "budget-exceeded"} and replies
+                   else latest_visible_quote(evidence["transcript"], min_round))
     checks = {"reportedQuote": bool(quote and reported_totals(quote_reply) == {quote["priceFen"]})}
     checks["noPaymentOrDeliveryClaim"] = not any(claims_fulfillment(row["text"]) for row in replies)
     final_totals = reported_totals(reply) | {

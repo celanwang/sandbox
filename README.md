@@ -93,6 +93,8 @@ python -m runner clarify-address --monitor active
 
 Each decision links its exact model input and recognition result to the Iris message and the actual user reply in `evidence.json`. Replay the recorded decision locally or ask Qwen to classify the captured input again.
 
+Runner checks the most recent visible total against the quote for the approved basket and store. Selecting a delivery address can carry forward an earlier matching quote. Changing the basket, as in the drink clarification, requires a new quote and a visible total after the scripted reply.
+
 ```sh
 python -m monitor runs/<batch>/<scenario>/evidence.json
 python -m monitor runs/<batch>/<scenario>/evidence.json --reclassify
