@@ -250,34 +250,54 @@ class EpisodeStore:
         self.bindings: dict[str, Episode] = {}
         self.opened: dict[str, tuple[str, str, str, int, tuple[Fault, ...]]] = {}
         self.used_credentials: set[str] = set()
+        self.archived_credentials: dict[str, set[str]] = {}
         self.lock = RLock()
         self.archive_dir = archive_dir
         if archive_dir is not None:
             archive_dir.mkdir(parents=True, exist_ok=True)
-            (archive_dir / ".credentials").mkdir(exist_ok=True)
+            credentials = archive_dir / ".credentials"
+            credentials.mkdir(exist_ok=True)
+            # The existing credential claims also reserve episode IDs across restarts.
+            for claim in credentials.iterdir():
+                if not re.fullmatch(r"[0-9a-f]{64}", claim.name):
+                    continue
+                self.used_credentials.add(claim.name)
+                episode_id = claim.read_text(encoding="utf-8").strip()
+                if re.fullmatch(r"[0-9a-f]{32}", episode_id):
+                    self.archived_credentials.setdefault(episode_id, set()).add(claim.name)
 
     def create(self, token: str, domain: Domain, scene: str, seed: int, faults: list[Fault],
                episode_id: str | None = None) -> tuple[str, bool]:
         credential = hashlib.sha256(token.encode()).hexdigest()
         config = credential, domain.name, scene, seed, tuple(faults)
         with self.lock:
-            if episode_id is not None and episode_id in self.opened:
+            episode_id = episode_id or uuid4().hex
+            if episode_id in self.episodes:
                 if self.opened[episode_id] != config:
                     raise EpisodeConflict("episode ID was already opened with different parameters")
                 return episode_id, False
-            claim = self.archive_dir / ".credentials" / credential if self.archive_dir is not None else None
-            if credential in self.used_credentials or (claim is not None and claim.exists()):
+            claims = self.archived_credentials.get(episode_id)
+            if episode_id in self.opened or claims:
+                archived = self.archived(episode_id)
+                if archived is None:
+                    raise EpisodeConflict("episode ID is retired; use a new episode ID")
+                if (claims != {credential} or
+                        (archived["domain"], archived["scene"], archived["seed"], archived["faultPlan"]) !=
+                        (domain.name, scene, seed, [fault.model_dump() for fault in faults])):
+                    raise EpisodeConflict("episode ID was already opened with different parameters")
+                return episode_id, False
+            if credential in self.used_credentials:
                 raise EpisodeConflict("MCP token already used by an episode")
-            archive = self.archive_path(episode_id) if episode_id else None
+            archive = self.archive_path(episode_id)
             if archive is not None and archive.exists():
                 raise EpisodeConflict("episode ID already has an archive")
             episode = Episode(domain, scene, seed, faults, episode_id)
-            if claim is not None:
-                try:
-                    with claim.open("x", encoding="utf-8") as file:
-                        file.write(episode.episode_id + "\n")
-                except FileExistsError as error:
-                    raise EpisodeConflict("MCP token already used by an episode") from error
+            if self.archive_dir is not None:
+                claim = self.archive_dir / ".credentials" / credential
+                if claim.exists():
+                    raise EpisodeConflict("MCP token already used by an episode")
+                write_atomic(claim, (episode_id + "\n",))
+                self.archived_credentials[episode_id] = {credential}
             self.episodes[episode.episode_id] = self.bindings[token] = episode
             self.used_credentials.add(credential)
             self.opened[episode.episode_id] = config
@@ -321,32 +341,43 @@ class EpisodeStore:
         if path is None:
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
+        except ValueError as error:
+            raise OSError("invalid episode archive") from error
+        if (not isinstance(snapshot, dict) or snapshot.get("episodeId") != episode_id
+                or snapshot.get("runId") != episode_id or snapshot.get("closed") is not True
+                or type(snapshot.get("generation")) is not int or not isinstance(snapshot.get("calls"), list)
+                or not isinstance(snapshot.get("domain"), str) or not isinstance(snapshot.get("scene"), str)
+                or type(snapshot.get("seed")) is not int or not isinstance(snapshot.get("faultPlan"), list)):
+            raise OSError("invalid episode archive")
+        return snapshot
 
-    def delete_archive(self, episode_id: str, generation: int | None = None) -> bool:
-        path = self.archive_path(episode_id)
-        if path is None:
-            return False
-        if generation is not None:
-            archived = self.archived(episode_id)
-            if archived is None:
+    def delete(self, episode_id: str, generation: int | None = None) -> bool:
+        with self.lock:
+            episode = self.episodes.get(episode_id)
+            if episode is not None:
+                with episode.lock:
+                    episode.require_generation(generation)
+                    if not episode.closed:
+                        raise EpisodeConflict("close the episode before deleting it")
+                    del self.episodes[episode_id]
+                return True
+            path = self.archive_path(episode_id)
+            if path is None:
                 return False
-            if generation != archived["generation"]:
-                raise EpisodeConflict("episode generation changed")
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            return False
+            if generation is not None:
+                archived = self.archived(episode_id)
+                if archived is None:
+                    return False
+                if generation != archived["generation"]:
+                    raise EpisodeConflict("episode generation changed")
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return False
         return True
-
-    def delete(self, episode: Episode, generation: int | None = None) -> None:
-        with self.lock, episode.lock:
-            episode.require_generation(generation)
-            if not episode.closed:
-                raise EpisodeConflict("close the episode before deleting it")
-            self.episodes.pop(episode.episode_id, None)
 
     def close(self, episode: Episode, generation: int | None = None) -> dict:
         with self.lock, episode.lock:

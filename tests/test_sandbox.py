@@ -303,6 +303,8 @@ def test_closed_episode_can_be_listed_and_purged(client):
     assert rows == [{"episodeId": run_id, "closed": True, "domain": "mcd", "scene": "lunch"}]
     assert client.delete(path, headers=ADMIN).status_code == 204
     assert client.get(f"{path}/snapshot", headers=ADMIN).status_code == 404
+    assert client.post("/admin/episodes", headers=ADMIN,
+                       json={"episodeId": run_id, "token": MCP_TOKEN}).status_code == 409
 
 
 def test_order_list_preserves_creation_order_on_same_clock(client):
@@ -467,6 +469,68 @@ def test_retired_token_remains_retired_after_archived_episode_is_deleted(tmp_pat
         assert http.delete(f"/admin/episodes/{episode}", headers=ADMIN).status_code == 204
     with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
         assert http.post("/admin/episodes", headers=ADMIN, json={"token": MCP_TOKEN}).status_code == 409
+
+
+def test_archived_open_is_idempotent_until_deleted_across_restarts(tmp_path):
+    from starlette.testclient import TestClient
+
+    from sandbox.server import create_app
+
+    def app():
+        return TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost")
+
+    with app() as http:
+        episode = start(http, seed=3, faults=[{"type": "SOLD_OUT", "target": "100101"}])
+        payload = {"episodeId": episode, "token": MCP_TOKEN, "seed": 3,
+                   "faults": [{"type": "SOLD_OUT", "target": "100101", "tool": "*", "nth": 1}]}
+        tool(http, "create-order", ORDER).raise_for_status()
+        sealed = admin(http, episode, "close", "POST").json()
+        assert http.post("/admin/episodes", headers=ADMIN, json=payload).status_code == 200
+    with app() as http:
+        retry = http.post("/admin/episodes", headers=ADMIN, json=payload)
+        assert retry.status_code == 200 and retry.json()["episodeId"] == episode
+        assert admin(http, episode, "snapshot").json() == sealed
+        assert tool(http, "order-list", endpoint=f"/mcp/{episode}/1").status_code == 401
+        for update in ({"seed": 4}, {"token": "different"}, {"faults": []}, {"scene": "engineering"}):
+            assert http.post("/admin/episodes", headers=ADMIN, json=payload | update).status_code == 409
+        assert http.delete(f"/admin/episodes/{episode}", headers=ADMIN).status_code == 204
+        assert http.post("/admin/episodes", headers=ADMIN, json=payload).status_code == 409
+    with app() as http:
+        assert http.post("/admin/episodes", headers=ADMIN, json=payload).status_code == 409
+        assert http.post("/admin/episodes", headers=ADMIN, json=payload | {"token": "different"}).status_code == 409
+        assert start(http, token="different") != episode
+
+
+def test_unsealed_episode_id_is_retired_on_restart(tmp_path):
+    from starlette.testclient import TestClient
+
+    from sandbox.server import create_app
+
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
+        episode = start(http)
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
+        assert http.get(f"/admin/episodes/{episode}/snapshot", headers=ADMIN).status_code == 404
+        for token in (MCP_TOKEN, "different"):
+            assert http.post("/admin/episodes", headers=ADMIN,
+                             json={"episodeId": episode, "token": token}).status_code == 409
+
+
+def test_failed_credential_publication_leaves_open_retryable(tmp_path, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from sandbox.server import create_app
+
+    def fail(path, chunks):
+        raise OSError("test credential write failure")
+
+    with TestClient(create_app(admin_token="test-admin", archive_dir=tmp_path), base_url="http://localhost") as http:
+        payload = {"episodeId": "1" * 32, "token": MCP_TOKEN}
+        with monkeypatch.context() as patch:
+            patch.setattr("sandbox.episodes.write_atomic", fail)
+            assert http.post("/admin/episodes", headers=ADMIN, json=payload).status_code == 503
+        assert http.get("/admin/episodes", headers=ADMIN).json()["episodes"] == []
+        assert tool(http, "order-list").status_code == 401
+        assert http.post("/admin/episodes", headers=ADMIN, json=payload).status_code == 201
 
 
 def test_reservation_is_consistent_in_order_receipts(client):

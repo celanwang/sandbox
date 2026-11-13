@@ -204,8 +204,9 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
                 raise ValueError("unknown domain or scene")
             if compare_digest(config.token, admin_token):
                 raise ValueError("episode and admin tokens must differ")
-            episode_id, created = store.create(config.token, domain, config.scene, config.seed, config.faults,
-                                               config.episodeId)
+            episode_id, created = await run_in_threadpool(
+                store.create, config.token, domain, config.scene, config.seed, config.faults, config.episodeId,
+            )
         except ValidationError as error:
             return JSONResponse({"errors": error.errors(include_input=False, include_context=False)}, status_code=400)
         except ValueError as error:
@@ -213,7 +214,7 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
         except EpisodeConflict as error:
             return JSONResponse({"error": str(error)}, status_code=409)
         except OSError:
-            log.exception("Could not persist the episode credential")
+            log.exception("Could not read or persist the episode identity")
             return JSONResponse({"error": "could not open episode"}, status_code=503)
         return JSONResponse({"episodeId": episode_id, "runId": episode_id}, status_code=201 if created else 200)
 
@@ -227,15 +228,21 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             if not re.fullmatch(r"[1-9][0-9]{0,9}", generation):
                 return JSONResponse({"error": "invalid episode generation"}, status_code=400)
             generation = int(generation)
+        if request.method == "DELETE":
+            try:
+                if await run_in_threadpool(store.delete, episode_id, generation):
+                    return Response(status_code=204)
+            except EpisodeConflict as error:
+                return JSONResponse({"error": str(error)}, status_code=409)
+            except OSError:
+                log.exception("Could not delete episode %s", episode_id)
+                return JSONResponse({"error": "episode archive unavailable"}, status_code=503)
+            return JSONResponse({"error": "episode not found"}, status_code=404)
         episode = store.get(episode_id)
         if episode is None:
             try:
-                if request.method == "DELETE" and await run_in_threadpool(store.delete_archive, episode_id, generation):
-                    return Response(status_code=204)
                 archived = await run_in_threadpool(store.archived, episode_id)
-            except EpisodeConflict as error:
-                return JSONResponse({"error": str(error)}, status_code=409)
-            except (OSError, ValueError):
+            except OSError:
                 log.exception("Could not access episode archive %s", episode_id)
                 return JSONResponse({"error": "episode archive unavailable"}, status_code=503)
             if archived is None:
@@ -249,12 +256,6 @@ def create_app(*, admin_token: str | None = None, domains: list[Domain] | None =
             if action in {"reset", "round"} and request.method == "POST":
                 return JSONResponse({"error": "episode is closed"}, status_code=409)
             return JSONResponse({"error": "unknown episode action"}, status_code=404)
-        if request.method == "DELETE":
-            try:
-                store.delete(episode, generation)
-            except EpisodeConflict as error:
-                return JSONResponse({"error": str(error)}, status_code=409)
-            return Response(status_code=204)
         try:
             if request.method == "GET":
                 if action == "snapshot":
