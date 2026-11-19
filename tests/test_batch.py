@@ -59,6 +59,19 @@ def test_prepare_freezes_specs_and_writes_manifest(workdir):
     assert manifest["counts"]["completed"] == 0
 
 
+def test_prepare_derives_tasks_from_set_when_plan_has_none(workdir):
+    plan_path = workdir / "plan.yaml"
+    plan_path.write_text("name: 全量批次\n", encoding="utf-8")
+    plan = load_plan(plan_path)
+    tasks = load_tasks()
+
+    manifest = prepare(plan, tasks, workdir / "runs")
+
+    assert plan.tasks == ()
+    assert manifest["counts"]["planned"] == len(tasks)
+    assert [entry["taskId"] for entry in manifest["tasks"]] == sorted(tasks)
+
+
 def test_prepare_rejects_unknown_tasks(workdir):
     plan = load_plan(_write_plan(workdir, ["order", "missing-task"]))
 

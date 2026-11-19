@@ -8,7 +8,7 @@ env:
 faults: []
 script:
   prompt: |
-    请列出我最近的订单，告诉我有没有进行中的订单。
+    请列出我最近的麦当劳（麦乐送）订单，告诉我有没有进行中的订单。
     只查询，不要下单。
   approve: false
   expectApproval: false

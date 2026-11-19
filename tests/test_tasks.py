@@ -75,14 +75,20 @@ def test_all_tasks_load(tasks):
     assert tasks["budget-exceeded"].script.budgetFen == 5000
 
 
-def test_task_set_directory_loads_its_tasks():
-    task_set = TASKS_DIR / "20261119T1347"
-
+@pytest.mark.parametrize("task_set", sorted(
+    path for path in TASKS_DIR.iterdir() if path.is_dir()), ids=lambda path: path.name)
+def test_task_set_directory_loads_its_tasks(task_set):
     assert (task_set / "task-set.json").is_file()
     loaded = load_tasks(task_set)
     assert len(loaded) == 13
     assert loaded["s0-address-query"].expect.quote is False
     assert loaded["s0-order-create"].script.approvals[0].call == "create"
+
+
+def test_order_list_prompt_limits_domain():
+    loaded = load_tasks(TASKS_DIR / "20261119T2229")
+
+    assert "麦当劳" in loaded["s0-order-list"].script.prompt
 
 
 def test_task_ids_match_file_names(tasks):

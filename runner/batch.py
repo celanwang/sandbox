@@ -30,14 +30,11 @@ class BatchPlan:
 
 def load_plan(path: Path) -> BatchPlan:
     config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    tasks = tuple(config.get("tasks") or ())
-    if not tasks:
-        raise ValueError(f"batch plan has no tasks: {path}")
     return BatchPlan(
         batch_id=str(config.get("batchId") or new_batch_id()),
         name=str(config.get("name") or path.stem),
         task_set_id=str(config.get("taskSetId") or path.stem),
-        tasks=tasks,
+        tasks=tuple(config.get("tasks") or ()),
         seed=config.get("seed"),
     )
 
@@ -47,15 +44,21 @@ def _spec_payload(spec: TaskSpec) -> dict:
 
 
 def prepare(plan: BatchPlan, tasks: dict[str, TaskSpec], out_root: Path) -> dict:
-    """创建批次目录，冻结任务定义，写入初始清单。"""
-    unknown = [task_id for task_id in plan.tasks if task_id not in tasks]
+    """创建批次目录，冻结任务定义，写入初始清单。
+
+    计划未显式列出任务时，使用任务集目录里的全部任务。
+    """
+    task_ids = plan.tasks or tuple(sorted(tasks))
+    if not task_ids:
+        raise ValueError("task set has no tasks")
+    unknown = [task_id for task_id in task_ids if task_id not in tasks]
     if unknown:
         raise ValueError(f"unknown tasks: {', '.join(unknown)}")
     batch_dir = out_root / plan.batch_id
     specs_dir = batch_dir / "specs"
     specs_dir.mkdir(parents=True, exist_ok=True)
     entries = []
-    for task_id in plan.tasks:
+    for task_id in task_ids:
         spec = tasks[task_id]
         (specs_dir / f"{task_id}.yaml").write_text(
             yaml.safe_dump(_spec_payload(spec), allow_unicode=True, sort_keys=False),
@@ -69,7 +72,7 @@ def prepare(plan: BatchPlan, tasks: dict[str, TaskSpec], out_root: Path) -> dict
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "tasks": entries,
         "runs": [],
-        "counts": {"planned": len(plan.tasks), "completed": 0, "passed": 0,
+        "counts": {"planned": len(task_ids), "completed": 0, "passed": 0,
                    "failed": 0, "unavailable": 0, "errored": 0},
     }
     _write(batch_dir / "batch.json", manifest)
